@@ -9,7 +9,8 @@ public class ModernButton : Control
     public Color PressColor { get; set; } = Theme.AccentDim;
     public Color TextColor { get; set; } = Color.White;
     public int CornerRadius { get; set; } = Theme.RadiusSmall;
-    public Image? Icon { get; set; }
+    public bool Outlined { get; set; } = false;
+    public bool GlowEffect { get; set; } = true;
 
     private bool _hovering;
     private bool _pressing;
@@ -19,7 +20,7 @@ public class ModernButton : Control
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
         BackColor = Color.Transparent;
         Font = Theme.FontButton;
-        Size = new Size(120, 36);
+        Size = new Size(130, 38);
         Cursor = Cursors.Hand;
     }
 
@@ -29,41 +30,49 @@ public class ModernButton : Control
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-        var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+        var rect = new Rectangle(1, 1, Width - 3, Height - 3);
         Color fill = Enabled
             ? (_pressing ? PressColor : (_hovering ? HoverColor : ButtonColor))
-            : Color.FromArgb(40, 40, 50);
+            : Color.FromArgb(25, 28, 40);
 
         using var path = RoundedPanel.CreateRoundedRect(rect, CornerRadius);
-        using var brush = new SolidBrush(fill);
-        g.FillPath(brush, path);
 
-        // Subtle top highlight
-        if (Enabled && !_pressing)
+        // Glow shadow behind button on hover
+        if (Enabled && _hovering && GlowEffect)
         {
-            using var highlightBrush = new SolidBrush(Color.FromArgb(15, 255, 255, 255));
-            var topRect = new Rectangle(0, 0, Width - 1, Height / 2);
-            using var topPath = RoundedPanel.CreateRoundedRect(topRect, CornerRadius);
-            g.FillPath(highlightBrush, topPath);
+            var glowRect = new Rectangle(-1, 2, Width + 1, Height);
+            using var glowPath = RoundedPanel.CreateRoundedRect(glowRect, CornerRadius + 2);
+            using var glowBrush = new SolidBrush(Color.FromArgb(30, fill));
+            g.FillPath(glowBrush, glowPath);
         }
 
-        // Text
-        Color textCol = Enabled ? TextColor : Color.FromArgb(80, 80, 90);
-        var textRect = ClientRectangle;
-
-        if (Icon != null)
+        if (Outlined && !_hovering)
         {
-            int iconSize = 16;
-            var totalWidth = iconSize + 6 + (int)g.MeasureString(Text, Font).Width;
-            int startX = (Width - totalWidth) / 2;
-            g.DrawImage(Icon, startX, (Height - iconSize) / 2, iconSize, iconSize);
-            textRect = new Rectangle(startX + iconSize + 6, 0, Width - startX - iconSize - 6, Height);
-            TextRenderer.DrawText(g, Text, Font, textRect, textCol, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            // Outlined style — transparent fill with colored border
+            using var borderPen = new Pen(fill, 1.5f);
+            g.DrawPath(borderPen, path);
         }
         else
         {
-            TextRenderer.DrawText(g, Text, Font, textRect, textCol, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            // Filled
+            using var brush = new SolidBrush(fill);
+            g.FillPath(brush, path);
+
+            // Top highlight (glass)
+            if (Enabled && !_pressing)
+            {
+                var topRect = new Rectangle(1, 1, Width - 3, (Height - 3) / 2);
+                using var topPath = RoundedPanel.CreateRoundedRect(topRect, CornerRadius);
+                using var highlightBrush = new SolidBrush(Color.FromArgb(18, 255, 255, 255));
+                g.FillPath(highlightBrush, topPath);
+            }
         }
+
+        // Text
+        Color tc = Enabled ? TextColor : Color.FromArgb(55, 58, 70);
+        if (Outlined && !_hovering) tc = fill;
+        TextRenderer.DrawText(g, Text, Font, ClientRectangle, tc,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
     protected override void OnMouseEnter(EventArgs e) { _hovering = true; Invalidate(); base.OnMouseEnter(e); }
