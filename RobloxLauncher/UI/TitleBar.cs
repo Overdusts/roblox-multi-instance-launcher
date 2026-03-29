@@ -15,8 +15,6 @@ public class TitleBar : Panel
 
     private readonly Form _parentForm;
     private readonly Label _titleLabel;
-
-    // Store actions for window buttons
     private readonly Dictionary<Panel, Action> _buttonActions = new();
 
     public string Title
@@ -28,37 +26,30 @@ public class TitleBar : Panel
     public TitleBar(Form parentForm)
     {
         _parentForm = parentForm;
-
-        Height = 38;
+        Height = 40;
         Dock = DockStyle.Top;
-        BackColor = Theme.BgDark;
-        Padding = new Padding(12, 0, 0, 0);
+        BackColor = Theme.BgDeep;
+        Padding = new Padding(14, 0, 0, 0);
 
-        // App icon dot
-        var dot = new Panel
-        {
-            Size = new Size(10, 10),
-            Location = new Point(14, 14),
-            BackColor = Theme.Accent,
-        };
+        // Neon accent dot
+        var dot = new Panel { Size = new Size(8, 8), Location = new Point(16, 16), BackColor = Theme.Accent };
 
         _titleLabel = new Label
         {
             Text = "Roblox Launcher",
-            Font = new Font("Segoe UI Semibold", 10f),
+            Font = new Font("Segoe UI Semibold", 10.5f),
             ForeColor = Theme.TextSecondary,
             AutoSize = true,
-            Location = new Point(30, 9),
+            Location = new Point(32, 10),
             BackColor = Color.Transparent,
         };
 
         var btnClose = MakeWindowButton("\u00d7", Theme.Danger, () => _parentForm.Close());
-        var btnMinimize = MakeWindowButton("\u2500", Theme.TextMuted, () => _parentForm.WindowState = FormWindowState.Minimized);
-        var btnMaximize = MakeWindowButton("\u25a1", Theme.TextMuted, () =>
+        var btnMin = MakeWindowButton("\u2500", Theme.TextMuted, () => _parentForm.WindowState = FormWindowState.Minimized);
+        var btnMax = MakeWindowButton("\u25a1", Theme.TextMuted, () =>
         {
             _parentForm.WindowState = _parentForm.WindowState == FormWindowState.Maximized
-                ? FormWindowState.Normal
-                : FormWindowState.Maximized;
+                ? FormWindowState.Normal : FormWindowState.Maximized;
         });
 
         var btnPanel = new FlowLayoutPanel
@@ -71,64 +62,48 @@ public class TitleBar : Panel
             Padding = Padding.Empty,
             Margin = Padding.Empty,
         };
-
-        btnPanel.Controls.Add(btnMinimize);
-        btnPanel.Controls.Add(btnMaximize);
+        btnPanel.Controls.Add(btnMin);
+        btnPanel.Controls.Add(btnMax);
         btnPanel.Controls.Add(btnClose);
 
         Controls.Add(btnPanel);
         Controls.Add(_titleLabel);
         Controls.Add(dot);
 
-        // Drag
         MouseDown += OnDrag;
         _titleLabel.MouseDown += OnDrag;
         dot.MouseDown += OnDrag;
 
-        // Double-click title to maximize
         _titleLabel.DoubleClick += (s, e) =>
-        {
             _parentForm.WindowState = _parentForm.WindowState == FormWindowState.Maximized
-                ? FormWindowState.Normal
-                : FormWindowState.Maximized;
-        };
+                ? FormWindowState.Normal : FormWindowState.Maximized;
     }
 
     private Panel MakeWindowButton(string symbol, Color hoverColor, Action onClick)
     {
         var btn = new Panel
         {
-            Size = new Size(44, 38),
+            Size = new Size(46, 40),
             BackColor = Color.Transparent,
             Margin = Padding.Empty,
             Cursor = Cursors.Hand,
         };
-
         _buttonActions[btn] = onClick;
 
         var lbl = new Label
         {
             Text = symbol,
             ForeColor = Theme.TextMuted,
-            Font = new Font("Segoe UI", 11f),
+            Font = new Font("Segoe UI", 12f),
             TextAlign = ContentAlignment.MiddleCenter,
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent,
         };
 
-        lbl.MouseEnter += (s, e) => { btn.BackColor = Color.FromArgb(40, hoverColor); lbl.ForeColor = hoverColor; };
+        lbl.MouseEnter += (s, e) => { btn.BackColor = Color.FromArgb(35, hoverColor); lbl.ForeColor = hoverColor; };
         lbl.MouseLeave += (s, e) => { btn.BackColor = Color.Transparent; lbl.ForeColor = Theme.TextMuted; };
-        lbl.Click += (s, e) =>
-        {
-            if (_buttonActions.TryGetValue(btn, out var action))
-                action();
-        };
-
-        btn.Click += (s, e) =>
-        {
-            if (_buttonActions.TryGetValue(btn, out var action))
-                action();
-        };
+        lbl.Click += (s, e) => { if (_buttonActions.TryGetValue(btn, out var a)) a(); };
+        btn.Click += (s, e) => { if (_buttonActions.TryGetValue(btn, out var a)) a(); };
 
         btn.Controls.Add(lbl);
         return btn;
@@ -146,7 +121,12 @@ public class TitleBar : Panel
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        // Subtle bottom border with accent hint
         using var pen = new Pen(Theme.Border, 1f);
         e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
+
+        // Tiny accent glow line
+        using var accentPen = new Pen(Color.FromArgb(30, Theme.Accent), 1f);
+        e.Graphics.DrawLine(accentPen, 0, Height - 2, Width / 3, Height - 2);
     }
 }
