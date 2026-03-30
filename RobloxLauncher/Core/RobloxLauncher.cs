@@ -285,34 +285,68 @@ public class RobloxInstanceLauncher
     }
 
     /// <summary>
-    /// Sets up a per-instance profile with the Roblox folder structure.
-    /// Copies FFlags and Versions directory structure.
+    /// Sets up a per-instance profile directory.
+    ///
+    /// Structure: profileDir/Roblox/
+    ///   - Versions -> JUNCTION to Roblox_original/Versions (so exe is accessible)
+    ///   - LocalStorage/ (per-instance cookies/auth)
+    ///   - GlobalBasicSettings_13.xml (per-instance settings)
+    ///
+    /// The key: Versions is a junction back to the real install so the exe works,
+    /// but auth/cookies in LocalStorage are isolated per instance.
     /// </summary>
     private void SetupInstanceProfile(string profileDir, string robloxPath)
     {
-        // Profile structure: profileDir/Roblox/Versions/version-xxx/ClientSettings/
         string robloxInProfile = Path.Combine(profileDir, "Roblox");
         Directory.CreateDirectory(robloxInProfile);
 
-        // Mirror the Versions directory structure
-        string versionName = Path.GetFileName(robloxPath); // e.g., version-abc123
-        string versionsDir = Path.Combine(robloxInProfile, "Versions", versionName);
-        Directory.CreateDirectory(versionsDir);
+        // Create junction: profileDir\Roblox\Versions -> real Versions directory
+        // This makes the exe accessible through the junction chain
+        string realVersionsDir = Path.GetDirectoryName(robloxPath)!; // e.g., C:\...\Roblox\Versions or from backup
+        string profileVersionsDir = Path.Combine(robloxInProfile, "Versions");
 
-        // Copy ClientSettings (FFlags)
-        string realClientSettings = Path.Combine(robloxPath, "ClientSettings");
-        string profileClientSettings = Path.Combine(versionsDir, "ClientSettings");
+        // Use backup path if it exists (since we renamed the original)
+        string backupVersionsDir = Path.Combine(RobloxBackupDir, "Versions");
+        string sourceVersions = Directory.Exists(backupVersionsDir) ? backupVersionsDir : realVersionsDir;
 
-        if (Directory.Exists(realClientSettings))
+        if (!Directory.Exists(profileVersionsDir))
         {
-            Directory.CreateDirectory(profileClientSettings);
-            foreach (var file in Directory.GetFiles(realClientSettings))
+            // Create junction to real Versions directory
+            var psi = new ProcessStartInfo
             {
-                File.Copy(file, Path.Combine(profileClientSettings, Path.GetFileName(file)), true);
+                FileName = "cmd.exe",
+                Arguments = $"/c mklink /j \"{profileVersionsDir}\" \"{sourceVersions}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            var proc = Process.Start(psi);
+            proc?.WaitForExit(5000);
+        }
+        else
+        {
+            // Check if existing Versions is a junction — if not, replace it
+            var info = new DirectoryInfo(profileVersionsDir);
+            if (!info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                // It's a real directory from old setup — remove and re-create as junction
+                try { Directory.Delete(profileVersionsDir, true); } catch { }
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c mklink /j \"{profileVersionsDir}\" \"{sourceVersions}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                var proc = Process.Start(psi);
+                proc?.WaitForExit(5000);
             }
         }
 
-        // Copy GlobalBasicSettings if exists in backup/original
+        // Copy GlobalBasicSettings if exists
         string origSettings = Path.Combine(RobloxBackupDir, "GlobalBasicSettings_13.xml");
         if (!File.Exists(origSettings))
             origSettings = Path.Combine(RobloxDataDir, "GlobalBasicSettings_13.xml");
@@ -322,6 +356,9 @@ public class RobloxInstanceLauncher
             if (!File.Exists(dest))
                 File.Copy(origSettings, dest, false);
         }
+
+        // Ensure LocalStorage directory exists (this is where auth cookies go)
+        Directory.CreateDirectory(Path.Combine(robloxInProfile, "LocalStorage"));
     }
 
     public async Task LaunchMultiple(int count, QualityPreset quality, int delayMs,
