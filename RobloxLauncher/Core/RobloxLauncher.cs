@@ -36,10 +36,10 @@ public class RobloxInstanceLauncher
     private readonly List<InstanceInfo> _instances = new();
     private bool _flagsApplied;
     private int _nextInstanceNum = 1;
-    private string? _robloxPath;
-    private bool _backupCreated;
+    private string? _robloxExePath;  // Full path to RobloxPlayerBeta.exe (resolved ONCE)
+    private string? _robloxVersionDir; // The version directory containing the exe
+    private string? _realVersionsDir;  // The real Versions directory (never changes)
 
-    // Lock so only one instance launches at a time (junction swap is not concurrent-safe)
     private static readonly SemaphoreSlim _launchLock = new(1, 1);
 
     public IReadOnlyList<InstanceInfo> Instances => _instances.AsReadOnly();
@@ -52,15 +52,11 @@ public class RobloxInstanceLauncher
     private static string ProfilesBaseDir =>
         Path.Combine(AppContext.BaseDirectory, "Profiles");
 
-    /// <summary>
-    /// The real Roblox directory: %LOCALAPPDATA%\Roblox
-    /// </summary>
+    /// <summary>%LOCALAPPDATA%\Roblox</summary>
     private static string RobloxDataDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Roblox");
 
-    /// <summary>
-    /// Backup of the original Roblox directory (before we start swapping)
-    /// </summary>
+    /// <summary>%LOCALAPPDATA%\Roblox_original (backup)</summary>
     private static string RobloxBackupDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Roblox_original");
 
@@ -70,38 +66,41 @@ public class RobloxInstanceLauncher
             instanceNum = _nextInstanceNum;
         _nextInstanceNum = instanceNum + 1;
 
-        _robloxPath ??= QualityOptimizer.GetRobloxPath();
-        if (_robloxPath == null)
+        // Resolve Roblox paths ONCE and cache them
+        if (_robloxExePath == null)
         {
-            Log("ERROR: Roblox installation not found");
-            return null;
-        }
+            string? robloxPath = QualityOptimizer.GetRobloxPath();
+            if (robloxPath == null)
+            {
+                Log("ERROR: Roblox installation not found");
+                return null;
+            }
 
-        string playerExe = Path.Combine(_robloxPath, "RobloxPlayerBeta.exe");
-        if (!File.Exists(playerExe))
-        {
-            Log("ERROR: RobloxPlayerBeta.exe not found");
-            return null;
+            _robloxVersionDir = robloxPath;
+            _robloxExePath = Path.Combine(robloxPath, "RobloxPlayerBeta.exe");
+            _realVersionsDir = Path.GetDirectoryName(robloxPath)!;
+
+            if (!File.Exists(_robloxExePath))
+            {
+                Log($"ERROR: RobloxPlayerBeta.exe not found at {_robloxExePath}");
+                _robloxExePath = null;
+                return null;
+            }
+
+            Log($"Roblox found: {_robloxExePath}");
         }
 
         // Apply FFlags once
         if (!_flagsApplied)
         {
             Log($"Applying {quality} optimization...");
-            QualityOptimizer.ApplyFFlags(_robloxPath, quality);
+            QualityOptimizer.ApplyFFlags(_robloxVersionDir!, quality);
             _flagsApplied = true;
-        }
-
-        // Backup original Roblox directory (first time only)
-        if (!_backupCreated)
-        {
-            BackupRobloxDir();
-            _backupCreated = true;
         }
 
         // Prepare this instance's profile
         string profileDir = Path.Combine(ProfilesBaseDir, $"Instance{instanceNum}");
-        SetupInstanceProfile(profileDir, _robloxPath);
+        SetupInstanceProfile(profileDir);
 
         // Start mutex monitor
         if (!MutexBypass.IsMonitoring)
@@ -113,39 +112,39 @@ public class RobloxInstanceLauncher
         MutexBypass.KillAllMutexes();
         await Task.Delay(500);
 
-        // Acquire launch lock — only one instance can swap the junction at a time
+        // Acquire launch lock — junction swap is not concurrent-safe
         await _launchLock.WaitAsync();
         try
         {
             Log($"Launching instance #{instanceNum} (profile: Instance{instanceNum})...");
 
-            // Swap junction: %LOCALAPPDATA%\Roblox -> this instance's profile
-            SwapJunction(profileDir);
+            // Swap: %LOCALAPPDATA%\Roblox -> this instance's profile
+            BackupAndSwap(profileDir);
 
             var process = Process.Start(new ProcessStartInfo
             {
-                FileName = playerExe,
+                FileName = _robloxExePath,
                 UseShellExecute = true,
-                WorkingDirectory = _robloxPath,
+                WorkingDirectory = _robloxVersionDir,
             });
 
             if (process == null)
             {
                 Log("ERROR: Failed to start Roblox");
-                RestoreOriginal();
+                Restore();
                 return null;
             }
 
-            // Wait for Roblox to read its data (auth, settings) from the junction
-            Log($"Instance #{instanceNum}: waiting for initialization...");
+            // Wait for Roblox to read its data directory
+            Log($"Instance #{instanceNum}: initializing...");
             for (int i = 0; i < 10; i++)
             {
                 await Task.Delay(500);
                 MutexBypass.KillAllMutexes();
             }
 
-            // Restore original so the next instance can launch
-            RestoreOriginal();
+            // Restore original directory
+            Restore();
 
             var instance = new InstanceInfo
             {
@@ -171,7 +170,7 @@ public class RobloxInstanceLauncher
         catch (Exception ex)
         {
             Log($"ERROR: {ex.Message}");
-            RestoreOriginal();
+            Restore();
             return null;
         }
         finally
@@ -181,85 +180,60 @@ public class RobloxInstanceLauncher
     }
 
     /// <summary>
-    /// Backup the real %LOCALAPPDATA%\Roblox directory.
-    /// Only done once — subsequent launches swap junctions.
+    /// Backup real Roblox dir and create junction to profile.
     /// </summary>
-    private void BackupRobloxDir()
+    private void BackupAndSwap(string profileDir)
     {
-        // If backup already exists, the original was already saved
-        if (Directory.Exists(RobloxBackupDir))
-        {
-            Log("Original Roblox data already backed up");
-            return;
-        }
+        string robloxInProfile = Path.Combine(profileDir, "Roblox");
 
-        if (Directory.Exists(RobloxDataDir))
-        {
-            // Check if it's a junction (from a previous session) — delete it
-            var info = new DirectoryInfo(RobloxDataDir);
-            if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                Directory.Delete(RobloxDataDir, false);
-                Log("Cleaned up stale junction");
-                return;
-            }
-
-            // Real directory — rename to backup
-            Directory.Move(RobloxDataDir, RobloxBackupDir);
-            Log("Backed up original Roblox data");
-        }
-    }
-
-    /// <summary>
-    /// Create a directory junction: %LOCALAPPDATA%\Roblox -> target profile dir.
-    /// Roblox will see this as its real data directory.
-    /// </summary>
-    private void SwapJunction(string profileDir)
-    {
-        // Remove current junction or directory at the target path
+        // Step 1: If Roblox dir exists and is real (not a junction), back it up
         if (Directory.Exists(RobloxDataDir))
         {
             var info = new DirectoryInfo(RobloxDataDir);
             if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
             {
-                // It's a junction — just delete the link (not the target)
+                // Already a junction from previous run — remove it
                 Directory.Delete(RobloxDataDir, false);
             }
             else
             {
-                // Real directory somehow appeared — move it out
-                string temp = RobloxDataDir + "_temp_" + Environment.TickCount;
-                Directory.Move(RobloxDataDir, temp);
+                // Real directory — rename to backup
+                if (Directory.Exists(RobloxBackupDir))
+                {
+                    // Backup already exists — don't overwrite it
+                    // This means we crashed before restoring last time
+                    // Just delete the current one (it should be identical to backup)
+                    Log("WARNING: Backup already exists, removing current dir");
+                    try { Directory.Delete(RobloxDataDir, true); }
+                    catch
+                    {
+                        // Can't delete while Roblox is running — just rename
+                        string temp = RobloxDataDir + "_old";
+                        if (Directory.Exists(temp)) try { Directory.Delete(temp, true); } catch { }
+                        Directory.Move(RobloxDataDir, temp);
+                    }
+                }
+                else
+                {
+                    Directory.Move(RobloxDataDir, RobloxBackupDir);
+                    Log("Backed up original Roblox data");
+                }
             }
         }
 
-        // Create junction: %LOCALAPPDATA%\Roblox -> profileDir\Roblox
-        string robloxInProfile = Path.Combine(profileDir, "Roblox");
-        Directory.CreateDirectory(robloxInProfile);
-
-        // Create junction using mklink /j
-        var psi = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
-            Arguments = $"/c mklink /j \"{RobloxDataDir}\" \"{robloxInProfile}\"",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        var proc = Process.Start(psi);
-        proc?.WaitForExit(5000);
+        // Step 2: Create junction %LOCALAPPDATA%\Roblox -> profileDir\Roblox
+        RunMklink(RobloxDataDir, robloxInProfile);
 
         if (Directory.Exists(RobloxDataDir))
-            Log($"Junction created -> Instance profile");
+            Log("Junction active -> Instance profile");
         else
-            Log("WARNING: Failed to create junction");
+            Log("WARNING: Junction creation failed!");
     }
 
     /// <summary>
-    /// Restore the original Roblox directory after an instance has started.
+    /// Restore original Roblox directory.
     /// </summary>
-    private void RestoreOriginal()
+    private void Restore()
     {
         try
         {
@@ -269,9 +243,10 @@ public class RobloxInstanceLauncher
                 var info = new DirectoryInfo(RobloxDataDir);
                 if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
                     Directory.Delete(RobloxDataDir, false);
+                // If it's real, don't touch it
             }
 
-            // Restore backup
+            // Move backup back
             if (Directory.Exists(RobloxBackupDir) && !Directory.Exists(RobloxDataDir))
             {
                 Directory.Move(RobloxBackupDir, RobloxDataDir);
@@ -280,85 +255,75 @@ public class RobloxInstanceLauncher
         }
         catch (Exception ex)
         {
-            Log($"WARNING: Could not restore original: {ex.Message}");
+            Log($"WARNING: Restore failed: {ex.Message}");
         }
     }
 
     /// <summary>
     /// Sets up a per-instance profile directory.
-    ///
-    /// Structure: profileDir/Roblox/
-    ///   - Versions -> JUNCTION to Roblox_original/Versions (so exe is accessible)
-    ///   - LocalStorage/ (per-instance cookies/auth)
-    ///   - GlobalBasicSettings_13.xml (per-instance settings)
-    ///
-    /// The key: Versions is a junction back to the real install so the exe works,
-    /// but auth/cookies in LocalStorage are isolated per instance.
+    /// Creates profileDir/Roblox/ with a Versions junction back to the real install
+    /// so the exe is accessible, while LocalStorage is per-instance for separate auth.
     /// </summary>
-    private void SetupInstanceProfile(string profileDir, string robloxPath)
+    private void SetupInstanceProfile(string profileDir)
     {
         string robloxInProfile = Path.Combine(profileDir, "Roblox");
         Directory.CreateDirectory(robloxInProfile);
 
-        // Create junction: profileDir\Roblox\Versions -> real Versions directory
-        // This makes the exe accessible through the junction chain
-        string realVersionsDir = Path.GetDirectoryName(robloxPath)!; // e.g., C:\...\Roblox\Versions or from backup
-        string profileVersionsDir = Path.Combine(robloxInProfile, "Versions");
+        // Junction: profileDir/Roblox/Versions -> real Versions dir
+        // This is key: the exe lives in Versions, so it must be accessible
+        string profileVersions = Path.Combine(robloxInProfile, "Versions");
+        string realVersions = _realVersionsDir!;
 
-        // Use backup path if it exists (since we renamed the original)
-        string backupVersionsDir = Path.Combine(RobloxBackupDir, "Versions");
-        string sourceVersions = Directory.Exists(backupVersionsDir) ? backupVersionsDir : realVersionsDir;
+        // Use backup location if the real one is already renamed
+        if (Directory.Exists(Path.Combine(RobloxBackupDir, "Versions")))
+            realVersions = Path.Combine(RobloxBackupDir, "Versions");
 
-        if (!Directory.Exists(profileVersionsDir))
+        if (!Directory.Exists(profileVersions))
         {
-            // Create junction to real Versions directory
-            var psi = new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c mklink /j \"{profileVersionsDir}\" \"{sourceVersions}\"",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            var proc = Process.Start(psi);
-            proc?.WaitForExit(5000);
+            RunMklink(profileVersions, realVersions);
         }
         else
         {
-            // Check if existing Versions is a junction — if not, replace it
-            var info = new DirectoryInfo(profileVersionsDir);
+            // Ensure it's a junction, not a real directory
+            var info = new DirectoryInfo(profileVersions);
             if (!info.Attributes.HasFlag(FileAttributes.ReparsePoint))
             {
-                // It's a real directory from old setup — remove and re-create as junction
-                try { Directory.Delete(profileVersionsDir, true); } catch { }
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c mklink /j \"{profileVersionsDir}\" \"{sourceVersions}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                var proc = Process.Start(psi);
-                proc?.WaitForExit(5000);
+                try { Directory.Delete(profileVersions, true); } catch { }
+                RunMklink(profileVersions, realVersions);
             }
         }
 
-        // Copy GlobalBasicSettings if exists
-        string origSettings = Path.Combine(RobloxBackupDir, "GlobalBasicSettings_13.xml");
-        if (!File.Exists(origSettings))
-            origSettings = Path.Combine(RobloxDataDir, "GlobalBasicSettings_13.xml");
-        if (File.Exists(origSettings))
+        // Copy GlobalBasicSettings (per-instance)
+        string[] settingsFiles = { "GlobalBasicSettings_13.xml", "GlobalSettings_13.xml" };
+        foreach (var file in settingsFiles)
         {
-            string dest = Path.Combine(robloxInProfile, "GlobalBasicSettings_13.xml");
-            if (!File.Exists(dest))
-                File.Copy(origSettings, dest, false);
+            string src = Path.Combine(RobloxBackupDir, file);
+            if (!File.Exists(src)) src = Path.Combine(RobloxDataDir, file);
+            if (File.Exists(src))
+            {
+                string dest = Path.Combine(robloxInProfile, file);
+                if (!File.Exists(dest))
+                    try { File.Copy(src, dest, false); } catch { }
+            }
         }
 
-        // Ensure LocalStorage directory exists (this is where auth cookies go)
+        // Ensure LocalStorage exists (per-instance auth cookies)
         Directory.CreateDirectory(Path.Combine(robloxInProfile, "LocalStorage"));
+    }
+
+    private static void RunMklink(string link, string target)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c mklink /j \"{link}\" \"{target}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        var proc = Process.Start(psi);
+        proc?.WaitForExit(5000);
     }
 
     public async Task LaunchMultiple(int count, QualityPreset quality, int delayMs,
@@ -406,9 +371,7 @@ public class RobloxInstanceLauncher
         _nextInstanceNum = 1;
 
         MutexBypass.StopMonitor();
-
-        // Make sure original is restored
-        RestoreOriginal();
+        Restore();
 
         Log("All instances closed");
         OnInstanceChanged?.Invoke();

@@ -16,20 +16,26 @@ public static class QualityOptimizer
 {
     public static string? GetRobloxPath()
     {
-        // Check common Roblox install locations
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string robloxVersionsPath = Path.Combine(localAppData, "Roblox", "Versions");
 
-        if (Directory.Exists(robloxVersionsPath))
+        // Check both normal and backup locations (backup may exist if previous session crashed)
+        string[] searchPaths = {
+            Path.Combine(localAppData, "Roblox", "Versions"),
+            Path.Combine(localAppData, "Roblox_original", "Versions"),
+        };
+
+        foreach (string robloxVersionsPath in searchPaths)
         {
-            // Find the latest version with RobloxPlayerBeta.exe
-            var versionDirs = Directory.GetDirectories(robloxVersionsPath)
-                .Where(d => File.Exists(Path.Combine(d, "RobloxPlayerBeta.exe")))
-                .OrderByDescending(d => Directory.GetLastWriteTime(d))
-                .FirstOrDefault();
+            if (Directory.Exists(robloxVersionsPath))
+            {
+                var versionDir = Directory.GetDirectories(robloxVersionsPath)
+                    .Where(d => File.Exists(Path.Combine(d, "RobloxPlayerBeta.exe")))
+                    .OrderByDescending(d => Directory.GetLastWriteTime(d))
+                    .FirstOrDefault();
 
-            if (versionDirs != null)
-                return versionDirs;
+                if (versionDir != null)
+                    return versionDir;
+            }
         }
 
         // Check Program Files
