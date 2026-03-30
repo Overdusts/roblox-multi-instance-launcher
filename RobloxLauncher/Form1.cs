@@ -94,7 +94,13 @@ public partial class Form1 : Form
 
         // Stats refresh timer
         _statsTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-        _statsTimer.Tick += (s, e) => RefreshStats();
+        _statsTimer.Tick += (s, e) =>
+        {
+            RefreshStats();
+            // Also live-update instance list if that page is visible
+            if (_pageInstances.Parent != null)
+                RefreshInstanceList();
+        };
         _statsTimer.Start();
     }
 
