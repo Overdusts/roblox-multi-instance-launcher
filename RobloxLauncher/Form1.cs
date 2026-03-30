@@ -8,13 +8,20 @@ namespace RobloxLauncher;
 
 public partial class Form1 : Form
 {
-    // ── Win32 for borderless resize ──
+    // ── Win32 ──
     [DllImport("user32.dll")]
     private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    // Anti-sleep: prevent system from going to sleep
+    [DllImport("kernel32.dll")]
+    private static extern uint SetThreadExecutionState(uint esFlags);
+    private const uint ES_CONTINUOUS = 0x80000000;
+    private const uint ES_SYSTEM_REQUIRED = 0x00000001;
+    private const uint ES_DISPLAY_REQUIRED = 0x00000002;
 
     private const int WM_NCHITTEST = 0x84;
     private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
@@ -25,23 +32,22 @@ public partial class Form1 : Form
     private readonly RobloxInstanceLauncher _launcher = new();
     private readonly AntiAFK _antiAfk;
     private CancellationTokenSource? _launchCts;
+    private bool _antiSleepEnabled;
 
     // ── UI Layout ──
     private TitleBar _titleBar = null!;
     private Panel _sidebar = null!;
     private Panel _contentArea = null!;
 
-    // Sidebar nav buttons
     private NavButton _navLaunch = null!;
     private NavButton _navInstances = null!;
     private NavButton _navSettings = null!;
 
-    // Pages (panels that swap in _contentArea)
     private Panel _pageLaunch = null!;
     private Panel _pageInstances = null!;
     private Panel _pageSettings = null!;
 
-    // Launch page controls
+    // Launch page
     private StatCard _statRunning = null!;
     private StatCard _statRAM = null!;
     private StatCard _statUptime = null!;
@@ -52,6 +58,9 @@ public partial class Form1 : Form
     private ModernButton _btnLaunchOne = null!;
     private ModernButton _btnStopLaunch = null!;
     private ModernButton _btnCloseAll = null!;
+    private ModernButton _btnAfkMode = null!;
+    private ModernButton _btnTrimRam = null!;
+    private bool _afkModeOn;
     private ModernLog _logBox = null!;
 
     // Instances page
@@ -62,8 +71,7 @@ public partial class Form1 : Form
     // Settings page
     private CheckBox _chkAntiAfk = null!;
     private ModernTextBox _txtAfkInterval = null!;
-    private ModernButton _btnApplyFlags = null!;
-    private ModernButton _btnResetFlags = null!;
+    private CheckBox _chkAntiSleep = null!;
     private CheckBox _chkTray = null!;
     private Label _lblRobloxPath = null!;
 
@@ -71,13 +79,12 @@ public partial class Form1 : Form
     private NotifyIcon _trayIcon = null!;
     private bool _minimizeToTray;
 
-    // Timer for live stats
     private System.Windows.Forms.Timer _statsTimer = null!;
 
     public Form1()
     {
         InitializeComponent();
-        _antiAfk = new AntiAFK(_launcher, 60);
+        _antiAfk = new AntiAFK(_launcher, 45);
 
         SetupForm();
         BuildTitleBar();
@@ -89,17 +96,22 @@ public partial class Form1 : Form
         BuildTray();
         SetupEvents();
 
-        // Default page
         ShowPage("launch");
 
-        // Stats refresh timer
         _statsTimer = new System.Windows.Forms.Timer { Interval = 2000 };
         _statsTimer.Tick += (s, e) =>
         {
             RefreshStats();
-            // Also live-update instance list if that page is visible
             if (_pageInstances.Parent != null)
                 RefreshInstanceList();
+
+            // Keep anti-sleep alive
+            if (_antiSleepEnabled)
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+
+            // Periodic RAM trim in AFK mode
+            if (_afkModeOn)
+                MemoryOptimizer.TrimAll(_launcher);
         };
         _statsTimer.Start();
     }
@@ -117,7 +129,6 @@ public partial class Form1 : Form
         BackColor = Theme.BgMain;
         StartPosition = FormStartPosition.CenterScreen;
 
-        // Dark title bar (Windows 11)
         try
         {
             int val = 1;
@@ -146,16 +157,9 @@ public partial class Form1 : Form
             Padding = new Padding(8, 12, 8, 12),
         };
 
-        // Accent line at top of sidebar
-        var accentLine = new Panel
-        {
-            Height = 2,
-            Dock = DockStyle.Top,
-            BackColor = Theme.Accent,
-        };
+        var accentLine = new Panel { Height = 2, Dock = DockStyle.Top, BackColor = Theme.Accent };
         _sidebar.Controls.Add(accentLine);
 
-        // Nav buttons
         _navLaunch = new NavButton { Text = "Launch", Icon = "\u25B6", ActiveColor = Theme.Accent, Dock = DockStyle.Top, Margin = new Padding(0, 8, 0, 2) };
         _navInstances = new NavButton { Text = "Instances", Icon = "\u25A0", ActiveColor = Theme.Cyan, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 2) };
         _navSettings = new NavButton { Text = "Settings", Icon = "\u2699", ActiveColor = Theme.Warning, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 2) };
@@ -164,10 +168,9 @@ public partial class Form1 : Form
         _navInstances.Click += (s, e) => ShowPage("instances");
         _navSettings.Click += (s, e) => ShowPage("settings");
 
-        // Version label at bottom
         var versionLabel = new Label
         {
-            Text = "v1.0 \u2022 Multi-Instance",
+            Text = "v1.1 \u2022 Multi-Instance",
             Font = Theme.FontSmall,
             ForeColor = Theme.TextMuted,
             Dock = DockStyle.Bottom,
@@ -176,18 +179,11 @@ public partial class Form1 : Form
         };
 
         _sidebar.Controls.Add(versionLabel);
-        // Add in reverse order since Dock=Top stacks from top
         _sidebar.Controls.Add(_navSettings);
         _sidebar.Controls.Add(_navInstances);
         _sidebar.Controls.Add(_navLaunch);
 
-        // Border on right edge
-        var sidebarBorder = new Panel
-        {
-            Width = 1,
-            Dock = DockStyle.Right,
-            BackColor = Theme.Border,
-        };
+        var sidebarBorder = new Panel { Width = 1, Dock = DockStyle.Right, BackColor = Theme.Border };
         _sidebar.Controls.Add(sidebarBorder);
 
         Controls.Add(_sidebar);
@@ -206,8 +202,6 @@ public partial class Form1 : Form
             Padding = new Padding(24, 16, 24, 16),
         };
         Controls.Add(_contentArea);
-
-        // Ensure correct z-order (titlebar on top, sidebar left, content fills rest)
         _contentArea.BringToFront();
     }
 
@@ -219,7 +213,6 @@ public partial class Form1 : Form
     {
         _pageLaunch = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
 
-        // ── Header ──
         var header = new Label
         {
             Text = "Dashboard",
@@ -230,7 +223,6 @@ public partial class Form1 : Form
         };
         _pageLaunch.Controls.Add(header);
 
-        // ── Stat cards row ──
         int cardY = 36;
         int cardSpacing = 12;
 
@@ -242,7 +234,6 @@ public partial class Form1 : Form
         _pageLaunch.Controls.Add(_statRAM);
         _pageLaunch.Controls.Add(_statUptime);
 
-        // ── Quick launch settings ──
         int settingsY = cardY + 104;
 
         var lblPreset = MakeLabel("Quality Preset:", 0, settingsY + 5);
@@ -254,7 +245,7 @@ public partial class Form1 : Form
         _txtCount = new ModernTextBox { Location = new Point(400, settingsY), Size = new Size(60, 34), Text = "3" };
 
         var lblDelay = MakeLabel("Delay (ms):", 480, settingsY + 5);
-        _txtDelay = new ModernTextBox { Location = new Point(570, settingsY), Size = new Size(80, 34), Text = "5000" };
+        _txtDelay = new ModernTextBox { Location = new Point(570, settingsY), Size = new Size(80, 34), Text = "8000" };
 
         _pageLaunch.Controls.Add(lblPreset);
         _pageLaunch.Controls.Add(_cmbPreset);
@@ -263,7 +254,6 @@ public partial class Form1 : Form
         _pageLaunch.Controls.Add(lblDelay);
         _pageLaunch.Controls.Add(_txtDelay);
 
-        // ── Action buttons ──
         int btnY = settingsY + 48;
 
         _btnLaunch = new ModernButton { Text = "\u25B6  Launch All", ButtonColor = Theme.Accent, Size = new Size(140, 38), Location = new Point(0, btnY) };
@@ -281,12 +271,42 @@ public partial class Form1 : Form
         _pageLaunch.Controls.Add(_btnStopLaunch);
         _pageLaunch.Controls.Add(_btnCloseAll);
 
-        // ── Log box ──
-        int logY = btnY + 50;
+        // ── AFK Mode buttons (second row) ──
+        int btnY2 = btnY + 46;
+        _btnAfkMode = new ModernButton { Text = "AFK Mode", ButtonColor = Theme.Success, Size = new Size(120, 36), Location = new Point(0, btnY2) };
+        _btnTrimRam = new ModernButton { Text = "Trim RAM", ButtonColor = Theme.AccentDim, Outlined = true, Size = new Size(110, 36), Location = new Point(132, btnY2) };
+
+        _btnAfkMode.Click += (s, e) =>
+        {
+            _afkModeOn = !_afkModeOn;
+            if (_afkModeOn)
+            {
+                MemoryOptimizer.EnableAfkMode(_launcher);
+                _btnAfkMode.Text = "Exit AFK";
+                _btnAfkMode.ButtonColor = Theme.Warning;
+            }
+            else
+            {
+                MemoryOptimizer.DisableAfkMode(_launcher);
+                _btnAfkMode.Text = "AFK Mode";
+                _btnAfkMode.ButtonColor = Theme.Success;
+            }
+            _btnAfkMode.Invalidate();
+        };
+
+        _btnTrimRam.Click += (s, e) =>
+        {
+            MemoryOptimizer.TrimAll(_launcher);
+            Log("RAM trimmed on all instances");
+        };
+
+        _pageLaunch.Controls.Add(_btnAfkMode);
+        _pageLaunch.Controls.Add(_btnTrimRam);
+
+        int logY = btnY2 + 46;
         _logBox = new ModernLog { Location = new Point(0, logY), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
         _pageLaunch.Controls.Add(_logBox);
 
-        // Resize handler to keep log filling remaining space
         _pageLaunch.Resize += (s, e) =>
         {
             _logBox.Size = new Size(_pageLaunch.ClientSize.Width, Math.Max(100, _pageLaunch.ClientSize.Height - logY));
@@ -311,7 +331,6 @@ public partial class Form1 : Form
         };
         _pageInstances.Controls.Add(header);
 
-        // Button bar
         int btnY = 36;
         _btnKillSelected = new ModernButton { Text = "Kill Selected", ButtonColor = Theme.Danger, Size = new Size(130, 36), Location = new Point(0, btnY) };
         _btnRefreshList = new ModernButton { Text = "Refresh", ButtonColor = Theme.AccentDim, Outlined = true, Size = new Size(100, 36), Location = new Point(142, btnY) };
@@ -322,7 +341,6 @@ public partial class Form1 : Form
         _pageInstances.Controls.Add(_btnKillSelected);
         _pageInstances.Controls.Add(_btnRefreshList);
 
-        // Instance list
         int listY = btnY + 46;
         _instanceList = new ModernListView
         {
@@ -363,9 +381,8 @@ public partial class Form1 : Form
         _pageSettings.Controls.Add(header);
 
         int y = 44;
-        int sectionGap = 36;
 
-        // ── Anti-AFK Section ──
+        // ── Anti-AFK ──
         var lblAfk = new Label { Text = "ANTI-AFK", Font = Theme.FontSubtitle, ForeColor = Theme.Cyan, AutoSize = true, Location = new Point(0, y) };
         _pageSettings.Controls.Add(lblAfk);
         y += 28;
@@ -373,15 +390,23 @@ public partial class Form1 : Form
         _chkAntiAfk = MakeCheckBox("Enable Anti-AFK", 0, y);
         _chkAntiAfk.CheckedChanged += (s, e) =>
         {
-            if (_chkAntiAfk.Checked) _antiAfk.Start();
-            else _antiAfk.Stop();
+            if (_chkAntiAfk.Checked)
+            {
+                _antiAfk.Start();
+                Log("Anti-AFK enabled");
+            }
+            else
+            {
+                _antiAfk.Stop();
+                Log("Anti-AFK disabled");
+            }
         };
         _pageSettings.Controls.Add(_chkAntiAfk);
-        y += 30;
+        y += 32;
 
-        var lblInterval = MakeLabel("Interval (seconds):", 0, y + 4);
-        _txtAfkInterval = new ModernTextBox { Location = new Point(160, y), Size = new Size(70, 34), Text = "60" };
-        var btnApplyInterval = new ModernButton { Text = "Apply", ButtonColor = Theme.Cyan, Size = new Size(70, 32), Location = new Point(240, y + 1) };
+        var lblInterval = MakeLabel("Interval (sec):", 0, y + 4);
+        _txtAfkInterval = new ModernTextBox { Location = new Point(120, y), Size = new Size(70, 34), Text = "45" };
+        var btnApplyInterval = new ModernButton { Text = "Apply", ButtonColor = Theme.Cyan, Size = new Size(70, 32), Location = new Point(200, y + 1) };
         btnApplyInterval.Click += (s, e) =>
         {
             if (int.TryParse(_txtAfkInterval.Text, out int sec) && sec >= 10)
@@ -394,39 +419,66 @@ public partial class Form1 : Form
         _pageSettings.Controls.Add(lblInterval);
         _pageSettings.Controls.Add(_txtAfkInterval);
         _pageSettings.Controls.Add(btnApplyInterval);
-        y += sectionGap + 16;
+        y += 52;
 
-        // ── FFlags Section ──
+        // ── Anti-Sleep ──
+        var lblSleep = new Label { Text = "ANTI-SLEEP", Font = Theme.FontSubtitle, ForeColor = Theme.Success, AutoSize = true, Location = new Point(0, y) };
+        _pageSettings.Controls.Add(lblSleep);
+        y += 28;
+
+        _chkAntiSleep = MakeCheckBox("Prevent laptop from sleeping", 0, y);
+        _chkAntiSleep.CheckedChanged += (s, e) =>
+        {
+            _antiSleepEnabled = _chkAntiSleep.Checked;
+            if (_antiSleepEnabled)
+            {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+                Log("Anti-Sleep ON — laptop will stay awake");
+            }
+            else
+            {
+                SetThreadExecutionState(ES_CONTINUOUS); // Reset to normal
+                Log("Anti-Sleep OFF — normal power settings");
+            }
+        };
+        _pageSettings.Controls.Add(_chkAntiSleep);
+        y += 52;
+
+        // ── FFlags ──
         var lblFlags = new Label { Text = "FFLAGS", Font = Theme.FontSubtitle, ForeColor = Theme.Accent, AutoSize = true, Location = new Point(0, y) };
         _pageSettings.Controls.Add(lblFlags);
         y += 28;
 
-        _btnApplyFlags = new ModernButton { Text = "Apply Potato FFlags", ButtonColor = Theme.Accent, Size = new Size(170, 36), Location = new Point(0, y) };
-        _btnResetFlags = new ModernButton { Text = "Reset FFlags", ButtonColor = Theme.Danger, Outlined = true, Size = new Size(130, 36), Location = new Point(182, y) };
+        var btnApplyFlags = new ModernButton { Text = "Apply Potato FFlags", ButtonColor = Theme.Accent, Size = new Size(170, 36), Location = new Point(0, y) };
+        var btnResetFlags = new ModernButton { Text = "Reset FFlags", ButtonColor = Theme.Danger, Outlined = true, Size = new Size(130, 36), Location = new Point(182, y) };
 
-        _btnApplyFlags.Click += (s, e) =>
+        btnApplyFlags.Click += (s, e) =>
         {
             string? path = QualityOptimizer.GetRobloxPath();
             if (path != null) { QualityOptimizer.ApplyFFlags(path, QualityPreset.Potato); Log("FFlags applied (Potato)"); }
             else Log("ERROR: Roblox not found");
         };
-        _btnResetFlags.Click += (s, e) =>
+        btnResetFlags.Click += (s, e) =>
         {
             string? path = QualityOptimizer.GetRobloxPath();
             if (path != null) { QualityOptimizer.ResetFFlags(path); Log("FFlags reset to default"); }
             else Log("ERROR: Roblox not found");
         };
-        _pageSettings.Controls.Add(_btnApplyFlags);
-        _pageSettings.Controls.Add(_btnResetFlags);
-        y += sectionGap + 16;
+        _pageSettings.Controls.Add(btnApplyFlags);
+        _pageSettings.Controls.Add(btnResetFlags);
+        y += 52;
 
-        // ── System Section ──
+        // ── System ──
         var lblSystem = new Label { Text = "SYSTEM", Font = Theme.FontSubtitle, ForeColor = Theme.Warning, AutoSize = true, Location = new Point(0, y) };
         _pageSettings.Controls.Add(lblSystem);
         y += 28;
 
         _chkTray = MakeCheckBox("Minimize to system tray", 0, y);
-        _chkTray.CheckedChanged += (s, e) => _minimizeToTray = _chkTray.Checked;
+        _chkTray.CheckedChanged += (s, e) =>
+        {
+            _minimizeToTray = _chkTray.Checked;
+            Log(_minimizeToTray ? "Minimize to tray ON" : "Minimize to tray OFF");
+        };
         _pageSettings.Controls.Add(_chkTray);
         y += 34;
 
@@ -446,7 +498,7 @@ public partial class Form1 : Form
     }
 
     // ═══════════════════════════════════════════
-    // SYSTEM TRAY
+    // TRAY
     // ═══════════════════════════════════════════
 
     private void BuildTray()
@@ -476,9 +528,10 @@ public partial class Form1 : Form
 
     private void SetupEvents()
     {
-        _launcher.OnLog += msg => BeginInvoke(() => { _logBox.AddLog(msg); });
+        _launcher.OnLog += msg => BeginInvoke(() => _logBox.AddLog(msg));
         _launcher.OnInstanceChanged += () => BeginInvoke(() => { RefreshStats(); RefreshInstanceList(); });
-        _antiAfk.OnLog += msg => BeginInvoke(() => { _logBox.AddLog(msg); });
+        _antiAfk.OnLog += msg => BeginInvoke(() => _logBox.AddLog(msg));
+        MemoryOptimizer.OnLog += msg => BeginInvoke(() => _logBox.AddLog(msg));
     }
 
     // ═══════════════════════════════════════════
@@ -501,7 +554,6 @@ public partial class Form1 : Form
         {
             case "launch":
                 _contentArea.Controls.Add(_pageLaunch);
-                // Trigger resize to fix log box size
                 _pageLaunch.Size = _contentArea.ClientSize;
                 break;
             case "instances":
@@ -525,7 +577,7 @@ public partial class Form1 : Form
     private async void OnLaunchAll(object? sender, EventArgs e)
     {
         if (!int.TryParse(_txtCount.Text, out int count) || count < 1) count = 3;
-        if (!int.TryParse(_txtDelay.Text, out int delay) || delay < 1000) delay = 5000;
+        if (!int.TryParse(_txtDelay.Text, out int delay) || delay < 1000) delay = 8000;
         var preset = GetSelectedPreset();
 
         _launchCts = new CancellationTokenSource();
@@ -565,6 +617,7 @@ public partial class Form1 : Form
     {
         _launchCts?.Cancel();
         _antiAfk.Stop();
+        if (_chkAntiAfk != null) _chkAntiAfk.Checked = false;
         _launcher.CloseAll();
     }
 
@@ -577,9 +630,7 @@ public partial class Form1 : Form
         {
             int idx = item.Index;
             if (idx < _launcher.Instances.Count)
-            {
                 _launcher.CloseInstance(_launcher.Instances[idx]);
-            }
         }
         RefreshInstanceList();
     }
@@ -655,15 +706,25 @@ public partial class Form1 : Form
         Location = new Point(x, y),
     };
 
-    private static CheckBox MakeCheckBox(string text, int x, int y) => new()
+    /// <summary>
+    /// Creates a visible checkbox on dark backgrounds.
+    /// Standard FlatStyle.Flat is invisible on dark themes.
+    /// </summary>
+    private static CheckBox MakeCheckBox(string text, int x, int y)
     {
-        Text = text,
-        Font = Theme.FontBody,
-        ForeColor = Theme.TextPrimary,
-        AutoSize = true,
-        Location = new Point(x, y),
-        FlatStyle = FlatStyle.Flat,
-    };
+        var chk = new CheckBox
+        {
+            Text = text,
+            Font = Theme.FontBody,
+            ForeColor = Theme.TextPrimary,
+            BackColor = Color.Transparent,
+            AutoSize = true,
+            Location = new Point(x, y),
+            FlatStyle = FlatStyle.Standard,
+            Appearance = Appearance.Normal,
+        };
+        return chk;
+    }
 
     // ═══════════════════════════════════════════
     // BORDERLESS RESIZE
@@ -719,6 +780,10 @@ public partial class Form1 : Form
         _antiAfk?.Dispose();
         MutexBypass.StopMonitor();
         _trayIcon?.Dispose();
+
+        // Reset power state on exit
+        SetThreadExecutionState(ES_CONTINUOUS);
+
         base.OnFormClosing(e);
     }
 }
