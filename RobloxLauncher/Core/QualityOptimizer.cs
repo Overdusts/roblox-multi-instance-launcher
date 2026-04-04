@@ -6,10 +6,12 @@ namespace RobloxLauncher.Core;
 
 public enum QualityPreset
 {
-    Potato,     // Absolute minimum - for max instances
-    Low,        // Playable but ugly
-    Medium,     // Balanced
-    Default     // Don't touch settings
+    Potato,
+    Low,
+    Medium,
+    Default,
+    MarvelRivals,       // Optimized for Marvel Rivals — balanced visuals + perf
+    MarvelRivalsPotato, // Marvel Rivals absolute minimum
 }
 
 public static class QualityOptimizer
@@ -17,28 +19,20 @@ public static class QualityOptimizer
     public static string? GetRobloxPath()
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string robloxVersionsPath = Path.Combine(localAppData, "Roblox", "Versions");
 
-        // Check both normal and backup locations (backup may exist if previous session crashed)
-        string[] searchPaths = {
-            Path.Combine(localAppData, "Roblox", "Versions"),
-            Path.Combine(localAppData, "Roblox_original", "Versions"),
-        };
-
-        foreach (string robloxVersionsPath in searchPaths)
+        if (Directory.Exists(robloxVersionsPath))
         {
-            if (Directory.Exists(robloxVersionsPath))
-            {
-                var versionDir = Directory.GetDirectories(robloxVersionsPath)
-                    .Where(d => File.Exists(Path.Combine(d, "RobloxPlayerBeta.exe")))
-                    .OrderByDescending(d => Directory.GetLastWriteTime(d))
-                    .FirstOrDefault();
+            var versionDir = Directory.GetDirectories(robloxVersionsPath)
+                .Where(d => File.Exists(Path.Combine(d, "RobloxPlayerBeta.exe")))
+                .OrderByDescending(d => Directory.GetLastWriteTime(d))
+                .FirstOrDefault();
 
-                if (versionDir != null)
-                    return versionDir;
-            }
+            if (versionDir != null)
+                return versionDir;
         }
 
-        // Check Program Files
+        // Program Files
         string programFiles = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Roblox", "Versions");
         if (Directory.Exists(programFiles))
         {
@@ -51,7 +45,7 @@ public static class QualityOptimizer
                 return versionDir;
         }
 
-        // Try registry
+        // Registry
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\ROBLOX Corporation\Environments\roblox-player");
@@ -71,18 +65,85 @@ public static class QualityOptimizer
             QualityPreset.Potato => GetPotatoFlags(),
             QualityPreset.Low => GetLowFlags(),
             QualityPreset.Medium => GetMediumFlags(),
+            QualityPreset.MarvelRivals => GetMarvelRivalsFlags(),
+            QualityPreset.MarvelRivalsPotato => GetMarvelRivalsPotatoFlags(),
             _ => new Dictionary<string, object>()
         };
     }
 
-    private static Dictionary<string, object> GetPotatoFlags()
+    /// <summary>
+    /// Marvel Rivals optimized — keeps ability effects visible at 30fps,
+    /// disables cosmetic fluff, keeps textures readable for hero identification.
+    /// </summary>
+    private static Dictionary<string, object> GetMarvelRivalsFlags()
     {
         return new Dictionary<string, object>
         {
-            // ═══ FPS — 1 FPS is enough for Blade Ball AFK ═══
-            ["DFIntTaskSchedulerTargetFps"] = 1,
+            // 30 FPS — smooth enough for combat, saves CPU
+            ["DFIntTaskSchedulerTargetFps"] = 30,
+            ["DFIntDebugFRMQualityLevelOverride"] = 3,
+            // D3D11 is more stable for multi-instance
+            ["FFlagDebugGraphicsPreferVulkan"] = false,
+            ["FFlagDebugGraphicsPreferD3D11FL10"] = true,
+            // Shadows off — huge perf gain, abilities still visible
+            ["FIntRenderShadowIntensity"] = 0,
+            ["FFlagDebugDisableShadows"] = true,
+            // Keep textures at low-med so you can identify heroes
+            ["DFIntTextureQualityOverride"] = 1,
+            // Reduce particles but keep ability effects visible
+            ["DFIntMaxParticleSpriteCount"] = 50,
+            ["DFIntMaxParticleMeshCount"] = 25,
+            ["FIntEmitterMaxSpawnedPerFrame"] = 8,
+            // Disable post-processing (bloom, DOF) — cleaner combat view
+            ["FFlagDisablePostFx"] = true,
+            // Disable grass/wind — not needed for Marvel Rivals maps
+            ["FIntRenderGrassDetailStrands"] = 0,
+            ["FFlagGrassMovement"] = false,
+            ["FFlagGlobalWindRendering"] = false,
+            // Reduce draw distance slightly
+            ["DFIntDebugRestrictGCDistance"] = 500,
+            // Lighting — use voxel for speed
+            ["DFFlagDebugRenderForceTechnologyVoxel"] = true,
+            ["FFlagFastGPULightCulling3"] = true,
+            ["FIntRenderLocalLightUpdatesMax"] = 4,
+            ["FIntRenderLocalLightUpdatesMin"] = 2,
+            // Mesh/memory limits
+            ["DFIntMaxMeshDataBufferSizeMB"] = 32,
+            ["DFIntCSGLevelOfDetailSwitchingDistance"] = 100,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL12"] = 200,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL23"] = 400,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL34"] = 600,
+            // Terrain
+            ["FIntTerrainOctreeMaxDepth"] = 4,
+            // Keep water on (some maps have it)
+            ["FFlagDebugDisableWater"] = false,
+            // Background FPS limit when unfocused
+            ["FIntRenderWindowManagerFrameRateManagerBackgroundFps"] = 5,
+            // Disable telemetry — saves CPU + network
+            ["FFlagDebugDisableTelemetryEphemeralCounter"] = true,
+            ["FFlagDebugDisableTelemetryEphemeralStat"] = true,
+            ["FFlagDebugDisableTelemetryEventIngest"] = true,
+            ["FFlagDebugDisableTelemetryPoint"] = true,
+            ["FFlagDebugDisableTelemetryV2Counter"] = true,
+            ["FFlagDebugDisableTelemetryV2Event"] = true,
+            ["FFlagDebugDisableTelemetryV2Stat"] = true,
+            // Disable ads
+            ["FFlagAdServiceEnabled"] = false,
+            // Reduce HTTP cache to save RAM
+            ["DFIntHttpCurlConnectionCacheSize"] = 10,
+            ["DFIntMaxImagesCacheSize"] = 64,
+        };
+    }
 
-            // ═══ Rendering — force lowest possible ═══
+    /// <summary>
+    /// Marvel Rivals absolute potato — max instances, minimum resources.
+    /// Only use for AFK farming or accounts that don't need to play actively.
+    /// </summary>
+    private static Dictionary<string, object> GetMarvelRivalsPotatoFlags()
+    {
+        return new Dictionary<string, object>
+        {
+            ["DFIntTaskSchedulerTargetFps"] = 1,
             ["FFlagDebugGraphicsPreferVulkan"] = false,
             ["FFlagDebugGraphicsPreferD3D11FL10"] = true,
             ["DFIntDebugFRMQualityLevelOverride"] = 1,
@@ -92,44 +153,28 @@ public static class QualityOptimizer
             ["FFlagDebugDisableShadows"] = true,
             ["FFlagDisablePostFx"] = true,
             ["FFlagDebugSkyGray"] = true,
-
-            // ═══ Force voxel lighting (cheapest) ═══
             ["DFFlagDebugRenderForceTechnologyVoxel"] = true,
             ["FFlagFastGPULightCulling3"] = true,
-
-            // ═══ Textures — absolute minimum ═══
             ["DFIntTextureQualityOverride"] = 0,
             ["DFIntTextureCompositorActiveJobs"] = 0,
             ["DFIntTextureCompositorQueueSize"] = 0,
-
-            // ═══ Meshes & models — lowest LOD ═══
             ["DFIntCSGLevelOfDetailSwitchingDistance"] = 0,
             ["DFIntCSGLevelOfDetailSwitchingDistanceL12"] = 0,
             ["DFIntCSGLevelOfDetailSwitchingDistanceL23"] = 0,
             ["DFIntCSGLevelOfDetailSwitchingDistanceL34"] = 0,
             ["DFIntMaxMeshDataBufferSizeMB"] = 8,
-
-            // ═══ Particles — kill everything ═══
             ["DFIntMaxParticleSpriteCount"] = 0,
             ["DFIntMaxParticleMeshCount"] = 0,
             ["FIntEmitterMaxSpawnedPerFrame"] = 0,
             ["FFlagEnableParticleEmitterCustomRate"] = false,
-
-            // ═══ Terrain & grass — nuke it ═══
             ["FIntTerrainOctreeMaxDepth"] = 1,
             ["FIntRenderGrassDetailStrands"] = 0,
             ["FFlagGrassMovement"] = false,
             ["FIntGrassMovementReducedMotionFactor"] = 0,
-
-            // ═══ Wind & environment ═══
             ["FFlagGlobalWindRendering"] = false,
             ["FFlagDebugDisableWater"] = true,
-
-            // ═══ Draw distance — very short ═══
             ["DFIntDebugRestrictGCDistance"] = 50,
             ["DFIntRenderingThrottleDelayInMS"] = 500,
-
-            // ═══ Disable all telemetry ═══
             ["FFlagDebugDisableTelemetryEphemeralCounter"] = true,
             ["FFlagDebugDisableTelemetryEphemeralStat"] = true,
             ["FFlagDebugDisableTelemetryEventIngest"] = true,
@@ -137,28 +182,73 @@ public static class QualityOptimizer
             ["FFlagDebugDisableTelemetryV2Counter"] = true,
             ["FFlagDebugDisableTelemetryV2Event"] = true,
             ["FFlagDebugDisableTelemetryV2Stat"] = true,
-
-            // ═══ Network — reduce overhead ═══
             ["DFIntHttpCurlConnectionCacheSize"] = 5,
-
-            // ═══ Memory — minimize everything ═══
             ["DFIntMaxImagesCacheSize"] = 32,
             ["DFIntAnimationLodFadeInDistance"] = 0,
             ["DFIntAnimationLodFadeOutDistance"] = 0,
-
-            // ═══ Audio — disable (saves CPU) ═══
             ["FFlagDebugDisableVoiceChat"] = true,
             ["DFIntMaxSoundsPerFrame"] = 0,
-
-            // ═══ Physics — reduce CPU ═══
             ["FFlagDebugSimPhysicsSingleStepping"] = true,
             ["DFIntPhysicsAnalyticsHighFrequencyIntervalInSeconds"] = 9999,
-
-            // ═══ GUI — lighten ═══
             ["DFIntCanHideGuiGroupId"] = 0,
             ["FFlagAdServiceEnabled"] = false,
+            ["FIntRenderWindowManagerFrameRateManagerBackgroundFps"] = 1,
+        };
+    }
 
-            // ═══ Unfocused throttling — near-zero when alt-tabbed ═══
+    private static Dictionary<string, object> GetPotatoFlags()
+    {
+        return new Dictionary<string, object>
+        {
+            ["DFIntTaskSchedulerTargetFps"] = 1,
+            ["FFlagDebugGraphicsPreferVulkan"] = false,
+            ["FFlagDebugGraphicsPreferD3D11FL10"] = true,
+            ["DFIntDebugFRMQualityLevelOverride"] = 1,
+            ["FIntRenderLocalLightUpdatesMax"] = 1,
+            ["FIntRenderLocalLightUpdatesMin"] = 1,
+            ["FIntRenderShadowIntensity"] = 0,
+            ["FFlagDebugDisableShadows"] = true,
+            ["FFlagDisablePostFx"] = true,
+            ["FFlagDebugSkyGray"] = true,
+            ["DFFlagDebugRenderForceTechnologyVoxel"] = true,
+            ["FFlagFastGPULightCulling3"] = true,
+            ["DFIntTextureQualityOverride"] = 0,
+            ["DFIntTextureCompositorActiveJobs"] = 0,
+            ["DFIntTextureCompositorQueueSize"] = 0,
+            ["DFIntCSGLevelOfDetailSwitchingDistance"] = 0,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL12"] = 0,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL23"] = 0,
+            ["DFIntCSGLevelOfDetailSwitchingDistanceL34"] = 0,
+            ["DFIntMaxMeshDataBufferSizeMB"] = 8,
+            ["DFIntMaxParticleSpriteCount"] = 0,
+            ["DFIntMaxParticleMeshCount"] = 0,
+            ["FIntEmitterMaxSpawnedPerFrame"] = 0,
+            ["FFlagEnableParticleEmitterCustomRate"] = false,
+            ["FIntTerrainOctreeMaxDepth"] = 1,
+            ["FIntRenderGrassDetailStrands"] = 0,
+            ["FFlagGrassMovement"] = false,
+            ["FIntGrassMovementReducedMotionFactor"] = 0,
+            ["FFlagGlobalWindRendering"] = false,
+            ["FFlagDebugDisableWater"] = true,
+            ["DFIntDebugRestrictGCDistance"] = 50,
+            ["DFIntRenderingThrottleDelayInMS"] = 500,
+            ["FFlagDebugDisableTelemetryEphemeralCounter"] = true,
+            ["FFlagDebugDisableTelemetryEphemeralStat"] = true,
+            ["FFlagDebugDisableTelemetryEventIngest"] = true,
+            ["FFlagDebugDisableTelemetryPoint"] = true,
+            ["FFlagDebugDisableTelemetryV2Counter"] = true,
+            ["FFlagDebugDisableTelemetryV2Event"] = true,
+            ["FFlagDebugDisableTelemetryV2Stat"] = true,
+            ["DFIntHttpCurlConnectionCacheSize"] = 5,
+            ["DFIntMaxImagesCacheSize"] = 32,
+            ["DFIntAnimationLodFadeInDistance"] = 0,
+            ["DFIntAnimationLodFadeOutDistance"] = 0,
+            ["FFlagDebugDisableVoiceChat"] = true,
+            ["DFIntMaxSoundsPerFrame"] = 0,
+            ["FFlagDebugSimPhysicsSingleStepping"] = true,
+            ["DFIntPhysicsAnalyticsHighFrequencyIntervalInSeconds"] = 9999,
+            ["DFIntCanHideGuiGroupId"] = 0,
+            ["FFlagAdServiceEnabled"] = false,
             ["FIntRenderWindowManagerFrameRateManagerBackgroundFps"] = 1,
         };
     }
@@ -216,21 +306,15 @@ public static class QualityOptimizer
         string settingsFile = Path.Combine(settingsDir, "ClientAppSettings.json");
         var flags = GetFFlags(preset);
 
-        // Merge with existing flags if any
         var existing = new JObject();
         if (File.Exists(settingsFile))
         {
-            try
-            {
-                existing = JObject.Parse(File.ReadAllText(settingsFile));
-            }
+            try { existing = JObject.Parse(File.ReadAllText(settingsFile)); }
             catch { }
         }
 
         foreach (var kvp in flags)
-        {
             existing[kvp.Key] = JToken.FromObject(kvp.Value);
-        }
 
         File.WriteAllText(settingsFile, existing.ToString(Formatting.Indented));
     }
