@@ -24,6 +24,9 @@ public class AntiAFK : IDisposable
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd); // Returns true if window is minimized
+
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
 
@@ -41,6 +44,9 @@ public class AntiAFK : IDisposable
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -90,8 +96,12 @@ public class AntiAFK : IDisposable
     private const uint WM_MOUSEMOVE = 0x0200;
     private const uint WM_ACTIVATEAPP = 0x001C;
 
-    // Virtual key codes: W A S D Space
-    private static readonly ushort[] GameKeys = { 0x57, 0x41, 0x53, 0x44, 0x20 };
+    private const int SW_MINIMIZE = 6;
+    private const int SW_SHOWNOACTIVATE = 4;
+    private const int SW_RESTORE = 9;
+
+    // Virtual key codes: W A S D Space F
+    private static readonly ushort[] GameKeys = { 0x57, 0x41, 0x53, 0x44, 0x20, 0x46 };
 
     private System.Threading.Timer? _timer;
     private readonly RobloxInstanceLauncher _launcher;
@@ -99,6 +109,7 @@ public class AntiAFK : IDisposable
     private bool _enabled;
     private int _tickCount;
     private readonly object _lock = new();
+    private bool _reMinimizeAfterPoke;
 
     public bool Enabled => _enabled;
     public int IntervalSeconds
@@ -107,9 +118,16 @@ public class AntiAFK : IDisposable
         set => _intervalMs = value * 1000;
     }
 
+    /// <summary>If true, windows will be re-minimized after poking (for AFK/Optimize mode).</summary>
+    public bool ReMinimizeAfterPoke
+    {
+        get => _reMinimizeAfterPoke;
+        set => _reMinimizeAfterPoke = value;
+    }
+
     public event Action<string>? OnLog;
 
-    public AntiAFK(RobloxInstanceLauncher launcher, int intervalSeconds = 45)
+    public AntiAFK(RobloxInstanceLauncher launcher, int intervalSeconds = 30)
     {
         _launcher = launcher;
         _intervalMs = intervalSeconds * 1000;
@@ -133,14 +151,19 @@ public class AntiAFK : IDisposable
         OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] Anti-AFK stopped");
     }
 
+    /// <summary>
+    /// Find ALL windows for a Roblox process — including minimized ones.
+    /// This is critical: the old code used IsWindowVisible which skips minimized windows.
+    /// </summary>
     private List<IntPtr> GetProcessWindows(int processId)
     {
         var windows = new List<IntPtr>();
         EnumWindows((hWnd, lParam) =>
         {
             GetWindowThreadProcessId(hWnd, out uint pid);
-            if (pid == (uint)processId && IsWindowVisible(hWnd))
+            if (pid == (uint)processId)
             {
+                // Check window title OR class name — catch both visible and minimized
                 int length = GetWindowTextLength(hWnd);
                 if (length > 0)
                 {
@@ -148,7 +171,19 @@ public class AntiAFK : IDisposable
                     GetWindowText(hWnd, sb, sb.Capacity);
                     string title = sb.ToString();
                     if (title.Contains("Roblox", StringComparison.OrdinalIgnoreCase))
+                    {
                         windows.Add(hWnd);
+                        return true;
+                    }
+                }
+
+                // Also check by class name (Roblox uses specific window classes)
+                var classSb = new System.Text.StringBuilder(256);
+                GetClassName(hWnd, classSb, classSb.Capacity);
+                string className = classSb.ToString();
+                if (className.Contains("Roblox", StringComparison.OrdinalIgnoreCase))
+                {
+                    windows.Add(hWnd);
                 }
             }
             return true;
@@ -165,6 +200,7 @@ public class AntiAFK : IDisposable
 
             // Save current foreground window to restore after
             IntPtr originalForeground = GetForegroundWindow();
+            var windowsToReMinimize = new List<IntPtr>();
 
             foreach (var inst in _launcher.Instances)
             {
@@ -175,31 +211,44 @@ public class AntiAFK : IDisposable
                     int pid = inst.Process!.Id;
                     var windows = GetProcessWindows(pid);
 
+                    // Fallback: try MainWindowHandle
                     if (windows.Count == 0)
                     {
-                        IntPtr mwh = inst.Process.MainWindowHandle;
-                        if (mwh != IntPtr.Zero)
-                            windows.Add(mwh);
+                        try
+                        {
+                            inst.Process.Refresh();
+                            IntPtr mwh = inst.Process.MainWindowHandle;
+                            if (mwh != IntPtr.Zero)
+                                windows.Add(mwh);
+                        }
+                        catch { }
                     }
 
                     foreach (var hwnd in windows)
                     {
-                        // Both methods every tick for maximum reliability
+                        bool wasMinimized = IsIconic(hwnd);
 
-                        // 1) PostMessage — works in background sometimes
-                        PokeWithPostMessage(hwnd);
+                        // If minimized, temporarily restore so SendInput works
+                        if (wasMinimized)
+                        {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            Thread.Sleep(80);
+                            windowsToReMinimize.Add(hwnd);
+                        }
 
-                        // 2) SendInput with focus — guaranteed to work
-                        PokeWithFocus(hwnd);
+                        // Focus the window and send REAL input via SendInput
+                        // This is the ONLY method Roblox accepts for anti-idle
+                        PokeWithRealInput(hwnd);
 
                         poked++;
-
-                        // Delay between instances to avoid input collision
-                        Thread.Sleep(150);
+                        Thread.Sleep(120);
                     }
                 }
                 catch { }
             }
+
+            // Small delay to let inputs register
+            Thread.Sleep(200);
 
             // Restore original foreground window
             if (originalForeground != IntPtr.Zero)
@@ -207,55 +256,78 @@ public class AntiAFK : IDisposable
                 try { ForceForeground(originalForeground); } catch { }
             }
 
+            // Re-minimize windows that were minimized before
+            if (_reMinimizeAfterPoke)
+            {
+                Thread.Sleep(100);
+                foreach (var hwnd in windowsToReMinimize)
+                {
+                    try { ShowWindow(hwnd, SW_MINIMIZE); } catch { }
+                }
+            }
+
             if (poked > 0)
-                OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] Anti-AFK: poked {poked} window(s)");
+                OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] Anti-AFK: poked {poked} window(s) (tick #{_tickCount})");
         }
     }
 
-    private void PokeWithPostMessage(IntPtr hwnd)
-    {
-        ushort key = GameKeys[_tickCount % GameKeys.Length];
-
-        PostMessage(hwnd, WM_ACTIVATEAPP, (IntPtr)1, IntPtr.Zero);
-        PostMessage(hwnd, WM_KEYDOWN, (IntPtr)key, IntPtr.Zero);
-        Thread.Sleep(30);
-        PostMessage(hwnd, WM_KEYUP, (IntPtr)key, IntPtr.Zero);
-
-        int jiggle = (_tickCount % 2 == 0) ? 3 : -3;
-        IntPtr lParam = (IntPtr)((300 + jiggle) | ((300 + jiggle) << 16));
-        PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
-    }
-
-    private void PokeWithFocus(IntPtr hwnd)
+    /// <summary>
+    /// The ONLY reliable anti-AFK method: focus the window and use SendInput.
+    /// Roblox ignores PostMessage — it uses GetAsyncKeyState/RawInput which
+    /// only responds to real hardware-level input from SendInput.
+    /// </summary>
+    private void PokeWithRealInput(IntPtr hwnd)
     {
         try
         {
+            // Focus the window
             ForceForeground(hwnd);
-            Thread.Sleep(100);
+            Thread.Sleep(80);
 
-            ushort key = GameKeys[(_tickCount + 1) % GameKeys.Length];
+            // Pick a key (rotate through WASD, Space, F)
+            ushort key = GameKeys[_tickCount % GameKeys.Length];
 
-            var inputs = new INPUT[4];
+            // Send: key press + mouse jiggle
+            var inputs = new INPUT[6];
 
+            // Key down
             inputs[0].type = INPUT_KEYBOARD;
             inputs[0].u.ki.wVk = key;
 
+            // Key up
             inputs[1].type = INPUT_KEYBOARD;
             inputs[1].u.ki.wVk = key;
             inputs[1].u.ki.dwFlags = KEYEVENTF_KEYUP;
 
+            // Mouse move right
             inputs[2].type = INPUT_MOUSE;
-            inputs[2].u.mi.dx = 2;
-            inputs[2].u.mi.dy = 0;
+            inputs[2].u.mi.dx = 3;
+            inputs[2].u.mi.dy = 2;
             inputs[2].u.mi.dwFlags = MOUSEEVENTF_MOVE;
 
+            // Mouse move back
             inputs[3].type = INPUT_MOUSE;
-            inputs[3].u.mi.dx = -2;
-            inputs[3].u.mi.dy = 0;
+            inputs[3].u.mi.dx = -3;
+            inputs[3].u.mi.dy = -2;
             inputs[3].u.mi.dwFlags = MOUSEEVENTF_MOVE;
 
-            SendInput(4, inputs, Marshal.SizeOf<INPUT>());
-            Thread.Sleep(60);
+            // Second key (different one for variety)
+            ushort key2 = GameKeys[(_tickCount + 2) % GameKeys.Length];
+            inputs[4].type = INPUT_KEYBOARD;
+            inputs[4].u.ki.wVk = key2;
+
+            inputs[5].type = INPUT_KEYBOARD;
+            inputs[5].u.ki.wVk = key2;
+            inputs[5].u.ki.dwFlags = KEYEVENTF_KEYUP;
+
+            SendInput(6, inputs, Marshal.SizeOf<INPUT>());
+            Thread.Sleep(50);
+
+            // Also send PostMessage as backup
+            PostMessage(hwnd, WM_ACTIVATEAPP, (IntPtr)1, IntPtr.Zero);
+            PostMessage(hwnd, WM_KEYDOWN, (IntPtr)key, IntPtr.Zero);
+            Thread.Sleep(20);
+            PostMessage(hwnd, WM_KEYUP, (IntPtr)key, IntPtr.Zero);
         }
         catch { }
     }

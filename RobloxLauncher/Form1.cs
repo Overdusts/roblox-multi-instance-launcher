@@ -326,12 +326,20 @@ public partial class Form1 : Form
                 MemoryOptimizer.EnableAfkMode(_launcher);
                 _btnAfkMode.Text = "Exit AFK";
                 _btnAfkMode.ButtonColor = Theme.Warning;
+
+                // Auto-enable Anti-AFK with re-minimize
+                _antiAfk.ReMinimizeAfterPoke = true;
+                if (!_antiAfk.Enabled) _antiAfk.Start();
+                if (_chkAntiAfk != null) _chkAntiAfk.Checked = true;
+                Log("Anti-AFK auto-enabled (windows will re-minimize after poke)");
             }
             else
             {
                 MemoryOptimizer.DisableAfkMode(_launcher);
                 _btnAfkMode.Text = "AFK Mode";
                 _btnAfkMode.ButtonColor = Theme.Success;
+
+                _antiAfk.ReMinimizeAfterPoke = false;
             }
             _btnAfkMode.Invalidate();
         };
@@ -343,12 +351,19 @@ public partial class Form1 : Form
                 MemoryOptimizer.OptimizeAll(_launcher);
                 _btnTrimRam.Text = "\u26A1 Restore";
                 _btnTrimRam.ButtonColor = Theme.Warning;
+
+                // Auto-enable Anti-AFK
+                _antiAfk.ReMinimizeAfterPoke = true;
+                if (!_antiAfk.Enabled) _antiAfk.Start();
+                if (_chkAntiAfk != null) _chkAntiAfk.Checked = true;
+                Log("Anti-AFK auto-enabled");
             }
             else
             {
                 MemoryOptimizer.RestoreAll(_launcher);
                 _btnTrimRam.Text = "\u26A1 Optimize";
                 _btnTrimRam.ButtonColor = Theme.Cyan;
+                _antiAfk.ReMinimizeAfterPoke = false;
             }
             _btnTrimRam.Invalidate();
         };
@@ -531,7 +546,7 @@ public partial class Form1 : Form
         y += 32;
 
         var lblInterval = MakeLabel("Interval (sec):", 0, y + 4);
-        _txtAfkInterval = new ModernTextBox { Location = new Point(120, y), Size = new Size(70, 34), Text = "45" };
+        _txtAfkInterval = new ModernTextBox { Location = new Point(120, y), Size = new Size(70, 34), Text = "30" };
         var btnApplyInterval = new ModernButton { Text = "Apply", ButtonColor = Theme.Cyan, Size = new Size(70, 32), Location = new Point(200, y + 1) };
         btnApplyInterval.Click += (s, e) =>
         {
@@ -599,6 +614,35 @@ public partial class Form1 : Form
         _pageSettings.Controls.Add(_txtTrimThreshold);
         _pageSettings.Controls.Add(btnApplyThreshold);
         y += 52;
+
+        // ── Global RAM Limit ──
+        var lblRamLimit = new Label { Text = "GLOBAL RAM LIMIT", Font = Theme.FontSubtitle, ForeColor = Theme.Warning, AutoSize = true, Location = new Point(0, y) };
+        _pageSettings.Controls.Add(lblRamLimit);
+        y += 28;
+
+        var lblRamCap = MakeLabel("Max RAM (MB):", 0, y + 4);
+        var txtRamLimit = new ModernTextBox { Location = new Point(120, y), Size = new Size(80, 34), Text = "4500" };
+        var btnApplyRamLimit = new ModernButton { Text = "Apply", ButtonColor = Theme.Warning, Size = new Size(70, 32), Location = new Point(210, y + 1) };
+        btnApplyRamLimit.Click += (s, e) =>
+        {
+            if (int.TryParse(txtRamLimit.Text, out int mb) && mb >= 500)
+            {
+                MemoryOptimizer.GlobalRamLimitMB = mb;
+                Log($"Global RAM limit set to {mb}MB ({mb / 1024.0:F1}GB)");
+            }
+            else
+            {
+                Log("RAM limit must be at least 500MB");
+            }
+        };
+        var lblRamInfo = MakeLabel("Auto-trims when total exceeds this. Default: 4500MB (4.5GB)", 0, y + 38);
+        lblRamInfo.ForeColor = Theme.TextSecondary;
+        lblRamInfo.AutoSize = true;
+        _pageSettings.Controls.Add(lblRamCap);
+        _pageSettings.Controls.Add(txtRamLimit);
+        _pageSettings.Controls.Add(btnApplyRamLimit);
+        _pageSettings.Controls.Add(lblRamInfo);
+        y += 72;
 
         // ── FFlags ──
         var lblFlags = new Label { Text = "FFLAGS", Font = Theme.FontSubtitle, ForeColor = Theme.Accent, AutoSize = true, Location = new Point(0, y) };
