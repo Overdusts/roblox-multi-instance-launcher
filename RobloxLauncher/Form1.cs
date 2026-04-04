@@ -31,6 +31,7 @@ public partial class Form1 : Form
     // ── Core ──
     private readonly RobloxInstanceLauncher _launcher = new();
     private readonly AntiAFK _antiAfk;
+    private readonly AccountManager _accountManager;
     private CancellationTokenSource? _launchCts;
     private bool _antiSleepEnabled;
 
@@ -40,16 +41,19 @@ public partial class Form1 : Form
     private Panel _contentArea = null!;
 
     private NavButton _navLaunch = null!;
+    private NavButton _navAccounts = null!;
     private NavButton _navInstances = null!;
     private NavButton _navSettings = null!;
 
     private Panel _pageLaunch = null!;
+    private Panel _pageAccounts = null!;
     private Panel _pageInstances = null!;
     private Panel _pageSettings = null!;
 
     // Launch page
     private StatCard _statRunning = null!;
     private StatCard _statRAM = null!;
+    private StatCard _statCPU = null!;
     private StatCard _statUptime = null!;
     private ModernComboBox _cmbPreset = null!;
     private ModernTextBox _txtCount = null!;
@@ -63,6 +67,14 @@ public partial class Form1 : Form
     private bool _afkModeOn;
     private ModernLog _logBox = null!;
 
+    // Accounts page
+    private ModernListView _accountList = null!;
+    private ModernButton _btnAddAccount = null!;
+    private ModernButton _btnRemoveAccount = null!;
+    private ModernButton _btnValidateAccount = null!;
+    private ModernButton _btnLaunchAccount = null!;
+    private ModernButton _btnLaunchAllAccounts = null!;
+
     // Instances page
     private ModernListView _instanceList = null!;
     private ModernButton _btnKillSelected = null!;
@@ -72,6 +84,8 @@ public partial class Form1 : Form
     private CheckBox _chkAntiAfk = null!;
     private ModernTextBox _txtAfkInterval = null!;
     private CheckBox _chkAntiSleep = null!;
+    private CheckBox _chkAutoTrim = null!;
+    private ModernTextBox _txtTrimThreshold = null!;
     private CheckBox _chkTray = null!;
     private Label _lblRobloxPath = null!;
 
@@ -86,11 +100,17 @@ public partial class Form1 : Form
         InitializeComponent();
         _antiAfk = new AntiAFK(_launcher, 45);
 
+        // Accounts saved next to the exe
+        string accountsPath = Path.Combine(AppContext.BaseDirectory, "accounts.json");
+        _accountManager = new AccountManager(accountsPath);
+        _accountManager.OnLog += msg => Log(msg);
+
         SetupForm();
         BuildTitleBar();
         BuildSidebar();
         BuildContentArea();
         BuildLaunchPage();
+        BuildAccountsPage();
         BuildInstancesPage();
         BuildSettingsPage();
         BuildTray();
@@ -104,6 +124,8 @@ public partial class Form1 : Form
             RefreshStats();
             if (_pageInstances.Parent != null)
                 RefreshInstanceList();
+            if (_pageAccounts.Parent != null)
+                RefreshAccountList();
 
             // Keep anti-sleep alive
             if (_antiSleepEnabled)
@@ -112,6 +134,12 @@ public partial class Form1 : Form
             // Periodic RAM trim in AFK mode
             if (_afkModeOn)
                 MemoryOptimizer.TrimAll(_launcher);
+
+            // Auto trim high RAM instances
+            MemoryOptimizer.AutoTrimIfHigh(_launcher);
+
+            // HARD 4.5GB global RAM limit — trim aggressively if exceeded
+            MemoryOptimizer.EnforceGlobalRamLimit(_launcher);
         };
         _statsTimer.Start();
     }
@@ -123,8 +151,8 @@ public partial class Form1 : Form
     private void SetupForm()
     {
         Text = "Roblox Launcher";
-        Size = new Size(960, 640);
-        MinimumSize = new Size(800, 540);
+        Size = new Size(1040, 700);
+        MinimumSize = new Size(900, 600);
         FormBorderStyle = FormBorderStyle.None;
         BackColor = Theme.BgMain;
         StartPosition = FormStartPosition.CenterScreen;
@@ -161,16 +189,18 @@ public partial class Form1 : Form
         _sidebar.Controls.Add(accentLine);
 
         _navLaunch = new NavButton { Text = "Launch", Icon = "\u25B6", ActiveColor = Theme.Accent, Dock = DockStyle.Top, Margin = new Padding(0, 8, 0, 2) };
+        _navAccounts = new NavButton { Text = "Accounts", Icon = "\u263A", ActiveColor = Theme.Success, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 2) };
         _navInstances = new NavButton { Text = "Instances", Icon = "\u25A0", ActiveColor = Theme.Cyan, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 2) };
         _navSettings = new NavButton { Text = "Settings", Icon = "\u2699", ActiveColor = Theme.Warning, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 2) };
 
         _navLaunch.Click += (s, e) => ShowPage("launch");
+        _navAccounts.Click += (s, e) => ShowPage("accounts");
         _navInstances.Click += (s, e) => ShowPage("instances");
         _navSettings.Click += (s, e) => ShowPage("settings");
 
         var versionLabel = new Label
         {
-            Text = "v1.1 \u2022 Multi-Instance",
+            Text = "v2.0 \u2022 Marvel Rivals",
             Font = Theme.FontSmall,
             ForeColor = Theme.TextMuted,
             Dock = DockStyle.Bottom,
@@ -181,6 +211,7 @@ public partial class Form1 : Form
         _sidebar.Controls.Add(versionLabel);
         _sidebar.Controls.Add(_navSettings);
         _sidebar.Controls.Add(_navInstances);
+        _sidebar.Controls.Add(_navAccounts);
         _sidebar.Controls.Add(_navLaunch);
 
         var sidebarBorder = new Panel { Width = 1, Dock = DockStyle.Right, BackColor = Theme.Border };
@@ -224,28 +255,39 @@ public partial class Form1 : Form
         _pageLaunch.Controls.Add(header);
 
         int cardY = 36;
-        int cardSpacing = 12;
+        int cardW = 155;
+        int cardSpacing = 10;
 
-        _statRunning = new StatCard { Value = "0", Label = "Running", AccentColor = Theme.Success, Location = new Point(0, cardY), Size = new Size(170, 90) };
-        _statRAM = new StatCard { Value = "0 MB", Label = "Total RAM", AccentColor = Theme.Accent, Location = new Point(170 + cardSpacing, cardY), Size = new Size(170, 90) };
-        _statUptime = new StatCard { Value = "0:00", Label = "Longest Uptime", AccentColor = Theme.Cyan, Location = new Point(340 + cardSpacing * 2, cardY), Size = new Size(170, 90) };
+        _statRunning = new StatCard { Value = "0", Label = "Running", AccentColor = Theme.Success, Location = new Point(0, cardY), Size = new Size(cardW, 90) };
+        _statRAM = new StatCard { Value = "0 MB", Label = "Total RAM", AccentColor = Theme.Accent, Location = new Point(cardW + cardSpacing, cardY), Size = new Size(cardW, 90) };
+        _statCPU = new StatCard { Value = "0%", Label = "Total CPU", AccentColor = Theme.Warning, Location = new Point((cardW + cardSpacing) * 2, cardY), Size = new Size(cardW, 90) };
+        _statUptime = new StatCard { Value = "0:00", Label = "Longest Uptime", AccentColor = Theme.Cyan, Location = new Point((cardW + cardSpacing) * 3, cardY), Size = new Size(cardW, 90) };
 
         _pageLaunch.Controls.Add(_statRunning);
         _pageLaunch.Controls.Add(_statRAM);
+        _pageLaunch.Controls.Add(_statCPU);
         _pageLaunch.Controls.Add(_statUptime);
 
         int settingsY = cardY + 104;
 
         var lblPreset = MakeLabel("Quality Preset:", 0, settingsY + 5);
-        _cmbPreset = new ModernComboBox { Location = new Point(120, settingsY), Size = new Size(160, 34) };
-        _cmbPreset.Items.AddRange(new object[] { "Potato (Max Instances)", "Low", "Medium", "Default" });
-        _cmbPreset.SelectedIndex = 0;
+        _cmbPreset = new ModernComboBox { Location = new Point(120, settingsY), Size = new Size(200, 34) };
+        _cmbPreset.Items.AddRange(new object[]
+        {
+            "Marvel Rivals (Balanced)",
+            "Marvel Rivals (Potato)",
+            "Potato (Max Instances)",
+            "Low",
+            "Medium",
+            "Default"
+        });
+        _cmbPreset.SelectedIndex = 1; // Default to Marvel Rivals (Potato) — max savings
 
-        var lblCount = MakeLabel("Instances:", 300, settingsY + 5);
-        _txtCount = new ModernTextBox { Location = new Point(400, settingsY), Size = new Size(60, 34), Text = "3" };
+        var lblCount = MakeLabel("Instances:", 340, settingsY + 5);
+        _txtCount = new ModernTextBox { Location = new Point(420, settingsY), Size = new Size(60, 34), Text = "3" };
 
-        var lblDelay = MakeLabel("Delay (ms):", 480, settingsY + 5);
-        _txtDelay = new ModernTextBox { Location = new Point(570, settingsY), Size = new Size(80, 34), Text = "8000" };
+        var lblDelay = MakeLabel("Delay (ms):", 500, settingsY + 5);
+        _txtDelay = new ModernTextBox { Location = new Point(590, settingsY), Size = new Size(80, 34), Text = "8000" };
 
         _pageLaunch.Controls.Add(lblPreset);
         _pageLaunch.Controls.Add(_cmbPreset);
@@ -274,7 +316,7 @@ public partial class Form1 : Form
         // ── AFK Mode buttons (second row) ──
         int btnY2 = btnY + 46;
         _btnAfkMode = new ModernButton { Text = "AFK Mode", ButtonColor = Theme.Success, Size = new Size(120, 36), Location = new Point(0, btnY2) };
-        _btnTrimRam = new ModernButton { Text = "Trim RAM", ButtonColor = Theme.AccentDim, Outlined = true, Size = new Size(110, 36), Location = new Point(132, btnY2) };
+        _btnTrimRam = new ModernButton { Text = "\u26A1 Optimize", ButtonColor = Theme.Cyan, Size = new Size(120, 36), Location = new Point(132, btnY2) };
 
         _btnAfkMode.Click += (s, e) =>
         {
@@ -296,8 +338,19 @@ public partial class Form1 : Form
 
         _btnTrimRam.Click += (s, e) =>
         {
-            MemoryOptimizer.TrimAll(_launcher);
-            Log("RAM trimmed on all instances");
+            if (!MemoryOptimizer.IsOptimized)
+            {
+                MemoryOptimizer.OptimizeAll(_launcher);
+                _btnTrimRam.Text = "\u26A1 Restore";
+                _btnTrimRam.ButtonColor = Theme.Warning;
+            }
+            else
+            {
+                MemoryOptimizer.RestoreAll(_launcher);
+                _btnTrimRam.Text = "\u26A1 Optimize";
+                _btnTrimRam.ButtonColor = Theme.Cyan;
+            }
+            _btnTrimRam.Invalidate();
         };
 
         _pageLaunch.Controls.Add(_btnAfkMode);
@@ -311,6 +364,77 @@ public partial class Form1 : Form
         {
             _logBox.Size = new Size(_pageLaunch.ClientSize.Width, Math.Max(100, _pageLaunch.ClientSize.Height - logY));
         };
+    }
+
+    // ═══════════════════════════════════════════
+    // ACCOUNTS PAGE
+    // ═══════════════════════════════════════════
+
+    private void BuildAccountsPage()
+    {
+        _pageAccounts = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+
+        var header = new Label
+        {
+            Text = "Accounts",
+            Font = Theme.FontTitle,
+            ForeColor = Theme.TextPrimary,
+            AutoSize = true,
+            Location = new Point(0, 0),
+        };
+        _pageAccounts.Controls.Add(header);
+
+        var subHeader = new Label
+        {
+            Text = "Add accounts to launch specific instances. Each account gets its own Roblox session.",
+            Font = Theme.FontSmall,
+            ForeColor = Theme.TextMuted,
+            AutoSize = true,
+            Location = new Point(0, 24),
+        };
+        _pageAccounts.Controls.Add(subHeader);
+
+        int btnY = 48;
+        _btnAddAccount = new ModernButton { Text = "+ Add Account", ButtonColor = Theme.Success, Size = new Size(140, 36), Location = new Point(0, btnY) };
+        _btnRemoveAccount = new ModernButton { Text = "Remove", ButtonColor = Theme.Danger, Outlined = true, Size = new Size(100, 36), Location = new Point(152, btnY) };
+        _btnValidateAccount = new ModernButton { Text = "Validate", ButtonColor = Theme.Cyan, Outlined = true, Size = new Size(100, 36), Location = new Point(264, btnY) };
+        _btnLaunchAccount = new ModernButton { Text = "\u25B6  Launch Selected", ButtonColor = Theme.Accent, Size = new Size(160, 36), Location = new Point(376, btnY) };
+        _btnLaunchAllAccounts = new ModernButton { Text = "\u25B6  Launch All Accs", ButtonColor = Theme.AccentDim, Size = new Size(160, 36), Location = new Point(548, btnY) };
+
+        _btnAddAccount.Click += OnAddAccount;
+        _btnRemoveAccount.Click += OnRemoveAccount;
+        _btnValidateAccount.Click += OnValidateAccount;
+        _btnLaunchAccount.Click += OnLaunchSelectedAccounts;
+        _btnLaunchAllAccounts.Click += OnLaunchAllAccounts;
+
+        _pageAccounts.Controls.Add(_btnAddAccount);
+        _pageAccounts.Controls.Add(_btnRemoveAccount);
+        _pageAccounts.Controls.Add(_btnValidateAccount);
+        _pageAccounts.Controls.Add(_btnLaunchAccount);
+        _pageAccounts.Controls.Add(_btnLaunchAllAccounts);
+
+        int listY = btnY + 46;
+        _accountList = new ModernListView
+        {
+            Location = new Point(0, listY),
+            CheckBoxes = true,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
+        };
+        _accountList.Columns.Add("#", 40);
+        _accountList.Columns.Add("Username", 140);
+        _accountList.Columns.Add("Display Name", 140);
+        _accountList.Columns.Add("User ID", 100);
+        _accountList.Columns.Add("Status", 100);
+        _accountList.Columns.Add("Last Validated", 150);
+
+        _pageAccounts.Controls.Add(_accountList);
+
+        _pageAccounts.Resize += (s, e) =>
+        {
+            _accountList.Size = new Size(_pageAccounts.ClientSize.Width, Math.Max(100, _pageAccounts.ClientSize.Height - listY));
+        };
+
+        RefreshAccountList();
     }
 
     // ═══════════════════════════════════════════
@@ -348,11 +472,13 @@ public partial class Form1 : Form
             CheckBoxes = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
         };
-        _instanceList.Columns.Add("#", 50);
-        _instanceList.Columns.Add("PID", 80);
-        _instanceList.Columns.Add("RAM (MB)", 100);
-        _instanceList.Columns.Add("Uptime", 120);
-        _instanceList.Columns.Add("Status", 100);
+        _instanceList.Columns.Add("#", 40);
+        _instanceList.Columns.Add("Account", 130);
+        _instanceList.Columns.Add("PID", 70);
+        _instanceList.Columns.Add("RAM (MB)", 90);
+        _instanceList.Columns.Add("CPU %", 70);
+        _instanceList.Columns.Add("Uptime", 100);
+        _instanceList.Columns.Add("Status", 80);
 
         _pageInstances.Controls.Add(_instanceList);
 
@@ -368,7 +494,7 @@ public partial class Form1 : Form
 
     private void BuildSettingsPage()
     {
-        _pageSettings = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+        _pageSettings = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, AutoScroll = true };
 
         var header = new Label
         {
@@ -444,15 +570,52 @@ public partial class Form1 : Form
         _pageSettings.Controls.Add(_chkAntiSleep);
         y += 52;
 
+        // ── Auto RAM Trim ──
+        var lblAutoTrim = new Label { Text = "AUTO RAM TRIM", Font = Theme.FontSubtitle, ForeColor = Theme.Accent, AutoSize = true, Location = new Point(0, y) };
+        _pageSettings.Controls.Add(lblAutoTrim);
+        y += 28;
+
+        _chkAutoTrim = MakeCheckBox("Auto-trim when RAM exceeds threshold", 0, y);
+        _chkAutoTrim.CheckedChanged += (s, e) =>
+        {
+            MemoryOptimizer.AutoTrimEnabled = _chkAutoTrim.Checked;
+            Log(MemoryOptimizer.AutoTrimEnabled ? "Auto RAM Trim ON" : "Auto RAM Trim OFF");
+        };
+        _pageSettings.Controls.Add(_chkAutoTrim);
+        y += 32;
+
+        var lblThreshold = MakeLabel("Threshold (MB):", 0, y + 4);
+        _txtTrimThreshold = new ModernTextBox { Location = new Point(120, y), Size = new Size(80, 34), Text = "800" };
+        var btnApplyThreshold = new ModernButton { Text = "Apply", ButtonColor = Theme.Accent, Size = new Size(70, 32), Location = new Point(210, y + 1) };
+        btnApplyThreshold.Click += (s, e) =>
+        {
+            if (int.TryParse(_txtTrimThreshold.Text, out int mb) && mb >= 100)
+            {
+                MemoryOptimizer.AutoTrimThresholdMB = mb;
+                Log($"Auto-trim threshold set to {mb}MB");
+            }
+        };
+        _pageSettings.Controls.Add(lblThreshold);
+        _pageSettings.Controls.Add(_txtTrimThreshold);
+        _pageSettings.Controls.Add(btnApplyThreshold);
+        y += 52;
+
         // ── FFlags ──
         var lblFlags = new Label { Text = "FFLAGS", Font = Theme.FontSubtitle, ForeColor = Theme.Accent, AutoSize = true, Location = new Point(0, y) };
         _pageSettings.Controls.Add(lblFlags);
         y += 28;
 
-        var btnApplyFlags = new ModernButton { Text = "Apply Potato FFlags", ButtonColor = Theme.Accent, Size = new Size(170, 36), Location = new Point(0, y) };
-        var btnResetFlags = new ModernButton { Text = "Reset FFlags", ButtonColor = Theme.Danger, Outlined = true, Size = new Size(130, 36), Location = new Point(182, y) };
+        var btnApplyMR = new ModernButton { Text = "Apply Marvel Rivals", ButtonColor = Theme.Success, Size = new Size(170, 36), Location = new Point(0, y) };
+        var btnApplyPotato = new ModernButton { Text = "Apply Potato", ButtonColor = Theme.Accent, Size = new Size(130, 36), Location = new Point(182, y) };
+        var btnResetFlags = new ModernButton { Text = "Reset FFlags", ButtonColor = Theme.Danger, Outlined = true, Size = new Size(130, 36), Location = new Point(324, y) };
 
-        btnApplyFlags.Click += (s, e) =>
+        btnApplyMR.Click += (s, e) =>
+        {
+            string? path = QualityOptimizer.GetRobloxPath();
+            if (path != null) { QualityOptimizer.ApplyFFlags(path, QualityPreset.MarvelRivals); Log("FFlags applied (Marvel Rivals)"); }
+            else Log("ERROR: Roblox not found");
+        };
+        btnApplyPotato.Click += (s, e) =>
         {
             string? path = QualityOptimizer.GetRobloxPath();
             if (path != null) { QualityOptimizer.ApplyFFlags(path, QualityPreset.Potato); Log("FFlags applied (Potato)"); }
@@ -464,7 +627,8 @@ public partial class Form1 : Form
             if (path != null) { QualityOptimizer.ResetFFlags(path); Log("FFlags reset to default"); }
             else Log("ERROR: Roblox not found");
         };
-        _pageSettings.Controls.Add(btnApplyFlags);
+        _pageSettings.Controls.Add(btnApplyMR);
+        _pageSettings.Controls.Add(btnApplyPotato);
         _pageSettings.Controls.Add(btnResetFlags);
         y += 52;
 
@@ -541,9 +705,11 @@ public partial class Form1 : Form
     private void ShowPage(string page)
     {
         _navLaunch.IsActive = page == "launch";
+        _navAccounts.IsActive = page == "accounts";
         _navInstances.IsActive = page == "instances";
         _navSettings.IsActive = page == "settings";
         _navLaunch.Invalidate();
+        _navAccounts.Invalidate();
         _navInstances.Invalidate();
         _navSettings.Invalidate();
 
@@ -555,6 +721,11 @@ public partial class Form1 : Form
             case "launch":
                 _contentArea.Controls.Add(_pageLaunch);
                 _pageLaunch.Size = _contentArea.ClientSize;
+                break;
+            case "accounts":
+                _contentArea.Controls.Add(_pageAccounts);
+                _pageAccounts.Size = _contentArea.ClientSize;
+                RefreshAccountList();
                 break;
             case "instances":
                 _contentArea.Controls.Add(_pageInstances);
@@ -571,7 +742,7 @@ public partial class Form1 : Form
     }
 
     // ═══════════════════════════════════════════
-    // BUTTON HANDLERS
+    // BUTTON HANDLERS — LAUNCH
     // ═══════════════════════════════════════════
 
     private async void OnLaunchAll(object? sender, EventArgs e)
@@ -636,6 +807,175 @@ public partial class Form1 : Form
     }
 
     // ═══════════════════════════════════════════
+    // BUTTON HANDLERS — ACCOUNTS
+    // ═══════════════════════════════════════════
+
+    private async void OnAddAccount(object? sender, EventArgs e)
+    {
+        using var dialog = new LoginDialog();
+        var result = dialog.ShowDialog(this);
+
+        if (result == DialogResult.OK && !string.IsNullOrEmpty(dialog.CapturedCookie))
+        {
+            Log("Validating account cookie...");
+            var account = await _accountManager.ValidateCookie(dialog.CapturedCookie);
+            if (account != null)
+            {
+                _accountManager.AddAccount(account);
+                Log($"Account added: {account.Label} (ID: {account.UserId})");
+                RefreshAccountList();
+            }
+            else
+            {
+                Log("ERROR: Cookie validation failed — account not added");
+            }
+        }
+    }
+
+    private void OnRemoveAccount(object? sender, EventArgs e)
+    {
+        var selected = _accountList.CheckedItems.Cast<ListViewItem>().ToList();
+        if (selected.Count == 0) return;
+
+        foreach (var item in selected)
+        {
+            int idx = item.Index;
+            if (idx < _accountManager.Accounts.Count)
+            {
+                var acc = _accountManager.Accounts[idx];
+                _accountManager.RemoveAccount(acc);
+                Log($"Removed account: {acc.Label}");
+            }
+        }
+        RefreshAccountList();
+    }
+
+    private async void OnValidateAccount(object? sender, EventArgs e)
+    {
+        var selected = _accountList.CheckedItems.Cast<ListViewItem>().ToList();
+        if (selected.Count == 0)
+        {
+            // Validate all
+            Log("Validating all accounts...");
+            foreach (var acc in _accountManager.Accounts.ToList())
+            {
+                var validated = await _accountManager.ValidateCookie(acc.Cookie);
+                if (validated != null)
+                {
+                    acc.IsValid = true;
+                    acc.LastValidated = DateTime.Now;
+                    acc.Username = validated.Username;
+                    acc.DisplayName = validated.DisplayName;
+                    Log($"  {acc.Label} — Valid");
+                }
+                else
+                {
+                    acc.IsValid = false;
+                    Log($"  {acc.Label} — INVALID");
+                }
+            }
+            _accountManager.Save();
+        }
+        else
+        {
+            foreach (var item in selected)
+            {
+                int idx = item.Index;
+                if (idx >= _accountManager.Accounts.Count) continue;
+                var acc = _accountManager.Accounts[idx];
+                Log($"Validating {acc.Label}...");
+                var validated = await _accountManager.ValidateCookie(acc.Cookie);
+                if (validated != null)
+                {
+                    acc.IsValid = true;
+                    acc.LastValidated = DateTime.Now;
+                    acc.Username = validated.Username;
+                    acc.DisplayName = validated.DisplayName;
+                    Log($"  {acc.Label} — Valid");
+                }
+                else
+                {
+                    acc.IsValid = false;
+                    Log($"  {acc.Label} — INVALID");
+                }
+            }
+            _accountManager.Save();
+        }
+        RefreshAccountList();
+    }
+
+    private async void OnLaunchSelectedAccounts(object? sender, EventArgs e)
+    {
+        var selected = _accountList.CheckedItems.Cast<ListViewItem>().ToList();
+        if (selected.Count == 0)
+        {
+            Log("No accounts selected — check accounts to launch");
+            return;
+        }
+
+        if (!int.TryParse(_txtDelay.Text, out int delay) || delay < 1000) delay = 8000;
+        var preset = GetSelectedPreset();
+
+        _btnLaunchAccount.Enabled = false;
+        _launchCts = new CancellationTokenSource();
+
+        try
+        {
+            var accounts = selected
+                .Where(item => item.Index < _accountManager.Accounts.Count)
+                .Select(item => _accountManager.Accounts[item.Index])
+                .Where(a => a.IsValid)
+                .ToList();
+
+            if (accounts.Count == 0)
+            {
+                Log("No valid accounts selected");
+                return;
+            }
+
+            await _launcher.LaunchAccounts(accounts, preset, delay, _accountManager, _launchCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("Account launch stopped");
+        }
+        finally
+        {
+            _btnLaunchAccount.Enabled = true;
+        }
+    }
+
+    private async void OnLaunchAllAccounts(object? sender, EventArgs e)
+    {
+        var validAccounts = _accountManager.Accounts.Where(a => a.IsValid).ToList();
+        if (validAccounts.Count == 0)
+        {
+            Log("No valid accounts to launch — add and validate accounts first");
+            return;
+        }
+
+        if (!int.TryParse(_txtDelay.Text, out int delay) || delay < 1000) delay = 8000;
+        var preset = GetSelectedPreset();
+
+        _btnLaunchAllAccounts.Enabled = false;
+        _launchCts = new CancellationTokenSource();
+
+        try
+        {
+            Log($"Launching {validAccounts.Count} accounts...");
+            await _launcher.LaunchAccounts(validAccounts, preset, delay, _accountManager, _launchCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("Account launch stopped");
+        }
+        finally
+        {
+            _btnLaunchAllAccounts.Enabled = true;
+        }
+    }
+
+    // ═══════════════════════════════════════════
     // STATS & REFRESH
     // ═══════════════════════════════════════════
 
@@ -643,24 +983,25 @@ public partial class Form1 : Form
     {
         _launcher.CleanupExited();
         int running = _launcher.RunningCount;
-        long totalRam = 0;
+        long totalRam = _launcher.TotalMemoryMB;
+        double totalCpu = _launcher.TotalCpuPercent;
         TimeSpan longest = TimeSpan.Zero;
 
         foreach (var inst in _launcher.Instances)
         {
             if (!inst.IsRunning) continue;
-            totalRam += inst.MemoryMB;
             var uptime = DateTime.Now - inst.LaunchedAt;
             if (uptime > longest) longest = uptime;
         }
 
         _statRunning.Value = running.ToString();
-        _statRAM.Value = $"{totalRam} MB";
+        _statRAM.Value = totalRam >= 1024 ? $"{totalRam / 1024.0:F1} GB" : $"{totalRam} MB";
+        _statCPU.Value = $"{totalCpu:F1}%";
         _statUptime.Value = longest.TotalHours >= 1
             ? $"{(int)longest.TotalHours}h {longest.Minutes:D2}m"
             : $"{longest.Minutes}:{longest.Seconds:D2}";
 
-        _titleBar.Title = $"  ROBLOX LAUNCHER  \u2022  {running} running";
+        _titleBar.Title = $"  ROBLOX LAUNCHER  \u2022  {running} running  \u2022  {_accountManager.Accounts.Count} accs";
     }
 
     private void RefreshInstanceList()
@@ -670,13 +1011,33 @@ public partial class Form1 : Form
         {
             var item = new ListViewItem(inst.InstanceNumber.ToString());
             bool alive = inst.IsRunning;
+            item.SubItems.Add(inst.AccountLabel);
             item.SubItems.Add(alive ? inst.Process!.Id.ToString() : "-");
             item.SubItems.Add(alive ? inst.MemoryMB.ToString() : "-");
+            item.SubItems.Add(alive ? $"{inst.CpuPercent:F1}" : "-");
             var uptime = alive ? DateTime.Now - inst.LaunchedAt : TimeSpan.Zero;
             item.SubItems.Add(alive ? $"{(int)uptime.TotalMinutes}:{uptime.Seconds:D2}" : "-");
             item.SubItems.Add(alive ? "Running" : "Closed");
             item.ForeColor = alive ? Theme.Success : Theme.TextMuted;
             _instanceList.Items.Add(item);
+        }
+    }
+
+    private void RefreshAccountList()
+    {
+        _accountList.Items.Clear();
+        int num = 1;
+        foreach (var acc in _accountManager.Accounts)
+        {
+            var item = new ListViewItem(num.ToString());
+            item.SubItems.Add(acc.Username);
+            item.SubItems.Add(acc.DisplayName);
+            item.SubItems.Add(acc.UserId.ToString());
+            item.SubItems.Add(acc.IsValid ? "Valid" : "Invalid");
+            item.SubItems.Add(acc.LastValidated > DateTime.MinValue ? acc.LastValidated.ToString("MM/dd HH:mm") : "Never");
+            item.ForeColor = acc.IsValid ? Theme.Success : Theme.Danger;
+            _accountList.Items.Add(item);
+            num++;
         }
     }
 
@@ -688,9 +1049,11 @@ public partial class Form1 : Form
     {
         return _cmbPreset.SelectedIndex switch
         {
-            0 => QualityPreset.Potato,
-            1 => QualityPreset.Low,
-            2 => QualityPreset.Medium,
+            0 => QualityPreset.MarvelRivals,
+            1 => QualityPreset.MarvelRivalsPotato,
+            2 => QualityPreset.Potato,
+            3 => QualityPreset.Low,
+            4 => QualityPreset.Medium,
             _ => QualityPreset.Default,
         };
     }

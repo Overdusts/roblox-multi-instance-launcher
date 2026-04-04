@@ -82,6 +82,8 @@ public class AccountManager
         }
     }
 
+    public event Action<string>? OnLog;
+
     public async Task<string?> GetCsrfToken(RobloxAccount account)
     {
         try
@@ -92,12 +94,24 @@ public class AccountManager
                 new Cookie(".ROBLOSECURITY", account.Cookie, "/", ".roblox.com"));
 
             using var client = new HttpClient(handler);
+            client.DefaultRequestHeaders.Add("User-Agent", "Roblox/WinInet");
             var response = await client.PostAsync("https://auth.roblox.com/v2/logout", null);
 
+            OnLog?.Invoke($"[AccountMgr] CSRF response: {(int)response.StatusCode} {response.StatusCode}");
+
             if (response.Headers.TryGetValues("x-csrf-token", out var values))
-                return values.FirstOrDefault();
+            {
+                var token = values.FirstOrDefault();
+                OnLog?.Invoke($"[AccountMgr] Got CSRF token: {token?[..Math.Min(10, token?.Length ?? 0)]}...");
+                return token;
+            }
+
+            OnLog?.Invoke("[AccountMgr] No x-csrf-token header in response");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"[AccountMgr] CSRF error: {ex.Message}");
+        }
         return null;
     }
 
@@ -106,7 +120,11 @@ public class AccountManager
         try
         {
             string? csrf = await GetCsrfToken(account);
-            if (csrf == null) return null;
+            if (csrf == null)
+            {
+                OnLog?.Invoke("[AccountMgr] Failed to get CSRF token — cannot generate auth ticket");
+                return null;
+            }
 
             using var handler = new HttpClientHandler();
             handler.CookieContainer = new CookieContainer();
@@ -116,14 +134,30 @@ public class AccountManager
             using var client = new HttpClient(handler);
             client.DefaultRequestHeaders.Add("x-csrf-token", csrf);
             client.DefaultRequestHeaders.Add("Referer", "https://www.roblox.com/");
-            client.DefaultRequestHeaders.Add("User-Agent", "RobloxLauncher/1.0");
+            client.DefaultRequestHeaders.Add("User-Agent", "Roblox/WinInet");
 
-            var response = await client.PostAsync("https://auth.roblox.com/v1/authentication-ticket", null);
+            var jsonContent = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            var response = await client.PostAsync("https://auth.roblox.com/v1/authentication-ticket", jsonContent);
+            OnLog?.Invoke($"[AccountMgr] Auth ticket response: {(int)response.StatusCode} {response.StatusCode}");
 
             if (response.Headers.TryGetValues("rbx-authentication-ticket", out var values))
-                return values.FirstOrDefault();
+            {
+                var ticket = values.FirstOrDefault();
+                if (!string.IsNullOrEmpty(ticket))
+                {
+                    OnLog?.Invoke($"[AccountMgr] Got auth ticket (length: {ticket.Length})");
+                    return ticket;
+                }
+            }
+
+            // Log response body for debugging
+            var body = await response.Content.ReadAsStringAsync();
+            OnLog?.Invoke($"[AccountMgr] Auth ticket response body: {body}");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"[AccountMgr] Auth ticket error: {ex.Message}");
+        }
         return null;
     }
 
